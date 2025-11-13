@@ -14,11 +14,8 @@ import {
   verifySignedTreeHead,
 } from "sigsum/dist/crypto";
 import { hexToBase64, hexToUint8Array } from "sigsum/dist/encoding";
-import {
-  Base64KeyHash,
-  Hash,
-  Signature,
-} from "sigsum/dist/types";
+import { Base64KeyHash, Hash, RawPublicKey, Signature } from "sigsum/dist/types";
+import { verifyHashWithCompiledPolicy } from "sigsum/dist/verify";
 import { canonicalize } from "./canonicalize";
 
 export interface EnrollmentInput {
@@ -179,16 +176,7 @@ function buildEnrollmentObject({
   };
 }
 
-async function loadEnrollment(path: string): Promise<EnrollmentInput> {
-  const raw = await readFile(path, "utf8");
-  let parsed: any;
-
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse enrollment JSON: ${err.message}`);
-  }
-
+function parseEnrollmentObject(parsed: any): EnrollmentInput {
   if (typeof parsed.policy !== "string" || parsed.policy.length === 0) {
     throw new Error("enrollment.policy must be a base64url string");
   }
@@ -216,6 +204,19 @@ async function loadEnrollment(path: string): Promise<EnrollmentInput> {
   validateCasUrl(parsed.cas_url);
 
   return parsed as EnrollmentInput;
+}
+
+async function loadEnrollment(path: string): Promise<EnrollmentInput> {
+  const raw = await readFile(path, "utf8");
+  let parsed: any;
+
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(`failed to parse enrollment JSON: ${err.message}`);
+  }
+
+  return parseEnrollmentObject(parsed);
 }
 
 async function writeMaybe(filePath: string | undefined, contents: string): Promise<void> {
@@ -348,14 +349,7 @@ async function scanDirectory(rootDir: string): Promise<DirectoryScanResult> {
   return result;
 }
 
-async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {
-  const raw = await readFile(manifestPath, "utf8");
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse manifest JSON: ${err.message}`);
-  }
+function parseManifestDocumentObject(parsed: any): ManifestDocument {
   if (typeof parsed !== "object" || parsed === null) {
     throw new Error("manifest file must contain a JSON object");
   }
@@ -385,8 +379,70 @@ async function loadManifestDocument(manifestPath: string): Promise<ManifestDocum
   return parsed as ManifestDocument;
 }
 
+async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {
+  const raw = await readFile(manifestPath, "utf8");
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(`failed to parse manifest JSON: ${err.message}`);
+  }
+  return parseManifestDocumentObject(parsed);
+}
+
 function canonicalizeManifestBody(document: ManifestDocument): string {
   return canonicalize(document.manifest);
+}
+
+function decodePolicyBytes(encoded: string): Uint8Array {
+  try {
+    const buffer = Buffer.from(encoded, "base64url");
+    if (buffer.length === 0) {
+      throw new Error("policy payload was empty");
+    }
+    return new Uint8Array(buffer);
+  } catch (err: any) {
+    throw new Error(`failed to decode compiled policy: ${err.message}`);
+  }
+}
+
+function normalizeProofText(proofText: string): string {
+  const versionMatch = proofText.match(/version=(\d+)/);
+  if (versionMatch?.[1] === "2" && !/\btree_size=/.test(proofText)) {
+    return proofText.replace(/(^|\n)size=/g, "$1tree_size=");
+  }
+  return proofText;
+}
+
+async function loadBundleDocument(bundlePath: string): Promise<{
+  enrollment: EnrollmentInput;
+  manifest: ManifestDocument;
+}> {
+  const raw = await readFile(bundlePath, "utf8");
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(`failed to parse bundle JSON: ${err.message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("bundle file must contain a JSON object");
+  }
+  if (!parsed.enrollment) {
+    throw new Error("bundle is missing 'enrollment'");
+  }
+  if (!parsed.manifest) {
+    throw new Error("bundle is missing 'manifest'");
+  }
+  if (!parsed.signatures) {
+    throw new Error("bundle is missing 'signatures'");
+  }
+  const enrollment = parseEnrollmentObject(parsed.enrollment);
+  const manifest = parseManifestDocumentObject({
+    manifest: parsed.manifest,
+    signatures: parsed.signatures,
+  });
+  return { enrollment, manifest };
 }
 
 async function runSigsumSubmit(policyPath: string, keyPath: string, payloadPath: string): Promise<void> {
@@ -700,6 +756,88 @@ manifest
     const digest = createHash("sha256").update(canonical).digest();
     process.stdout.write(toBase64Url(digest) + "\n");
   });
+
+manifest
+  .command("verify")
+  .description(
+    "Verify that a manifest (or bundle) satisfies the enrollment signer threshold",
+  )
+  .argument(
+    "<enrollment-or-bundle>",
+    "Path to an enrollment JSON file or to a bundle JSON file",
+  )
+  .argument(
+    "[manifest]",
+    "Path to a signed manifest JSON file (omit when providing a bundle)",
+  )
+  .action(
+    async (primaryPath: string, manifestPath?: string) => {
+      let enrollment: EnrollmentInput;
+      let manifestDocument: ManifestDocument;
+
+      if (manifestPath) {
+        enrollment = await loadEnrollment(primaryPath);
+        manifestDocument = await loadManifestDocument(manifestPath);
+      } else {
+        const bundle = await loadBundleDocument(primaryPath);
+        enrollment = bundle.enrollment;
+        manifestDocument = bundle.manifest;
+      }
+
+      const canonicalManifest = canonicalizeManifestBody(manifestDocument);
+      const manifestHash = new Uint8Array(
+        createHash("sha256").update(canonicalManifest).digest(),
+      );
+      const compiledPolicy = decodePolicyBytes(enrollment.policy);
+      const policyHash = createHash("sha256")
+        .update(compiledPolicy)
+        .digest("base64url");
+
+      const signerResults: { signer: string; ok: boolean; message?: string }[] = [];
+      let verified = 0;
+
+      for (const signer of enrollment.signers) {
+        const proofText = manifestDocument.signatures[signer];
+        if (!proofText) {
+          signerResults.push({ signer, ok: false, message: "signature missing" });
+          continue;
+        }
+        try {
+          const signerKey = new RawPublicKey(
+            new Uint8Array(decodeKeyMaterial(signer, "enrollment signer")),
+          );
+          const normalizedProof = normalizeProofText(proofText);
+          const ok = await verifyHashWithCompiledPolicy(
+            manifestHash,
+            signerKey,
+            compiledPolicy,
+            normalizedProof,
+          );
+          if (ok) {
+            verified += 1;
+            signerResults.push({ signer, ok: true });
+          } else {
+            signerResults.push({ signer, ok: false, message: "invalid proof" });
+          }
+        } catch (err: any) {
+          signerResults.push({ signer, ok: false, message: err.message });
+        }
+      }
+
+      for (const result of signerResults) {
+        const status = result.ok ? "OK" : "FAIL";
+        const extra = result.message ? ` (${result.message})` : "";
+        process.stdout.write(`Signer ${result.signer}: ${status}${extra}\n`);
+      }
+
+      const passed = verified >= enrollment.threshold;
+      const summaryStatus = passed ? "VERIFIED" : "FAILED";
+      process.stdout.write(
+        `${summaryStatus}: ${verified}/${enrollment.threshold} required signatures verified\n`,
+      );
+      process.stdout.write(`Enrollment policy hash: ${policyHash}\n`);
+    },
+  );
 
 const bundle = program.command("bundle").description("Bundle helpers");
 

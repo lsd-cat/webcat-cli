@@ -55,12 +55,19 @@ The `manifest` namespace operates on WEBCAT manifests:
 | `manifest sign` | Canonicalize a manifest body, call `sigsum-submit`, and attach the returned proof under a signer key. |
 | `manifest canonicalize` | Canonicalize an existing manifest JSON document. |
 | `manifest hash` | Canonicalize and SHA-256 hash a manifest, outputting a base64url digest. |
+| `manifest verify` | Verify signatures in a manifest (or bundle) against an enrollment and print the policy hash. |
 
 Example – hash the provided manifest:
 
 ```sh
 npx tsx src/cli.ts manifest hash -i examples/manifest.json
 # => 8OYr4SFw2U2NR2efE69FAKZicf_2QbUGxXT7kxN1C80
+```
+
+Example – verify a bundle:
+
+```sh
+npx tsx src/cli.ts manifest verify examples/bundle.json
 ```
 
 ## Bundle helpers
