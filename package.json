@@ -1,0 +1,18 @@
+{
+  "name": "webcat-cli",
+  "version": "0.1.0",
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "commander": "^14.0.2",
+    "sigsum": "^0.3.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/yargs": "^17.0.34",
+    "tsx": "^4.16.0",
+    "typescript": "^5.9.3"
+  }
+}

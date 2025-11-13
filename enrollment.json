@@ -1,0 +1,9 @@
+{
+  "policy": "AAECBEZEryq9QPSJWgA7yjUPnVkSqzAaScd_E-W22QXCCl_mHCX4pExjVFfi45HR77yn1MKVGgrvBiJaiB5GuYlirGwoySpaOgVNMXyG_C7ranqyBU1iFxANC-Z97Vt0MjxYBkBBAYE",
+  "signers": [
+    "qruqu6q7qruqu6q7qruqu6q7qruqu6q7qruqu6q7qrs"
+  ],
+  "threshold": 1,
+  "max_age": 1000000,
+  "cas_url": "https://lsd.cat"
+}
