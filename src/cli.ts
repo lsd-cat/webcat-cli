@@ -1,9 +1,24 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import process from "node:process";
+import path from "node:path";
 import { compilePolicy } from "sigsum/dist/policyCompiler";
+import { parsePolicyText } from "sigsum/dist/config";
+import {
+  hashKey,
+  verifyCosignedTreeHead,
+  verifySignedTreeHead,
+} from "sigsum/dist/crypto";
+import { hexToBase64, hexToUint8Array } from "sigsum/dist/encoding";
+import { verifyHash } from "sigsum/dist/verify";
+import {
+  Base64KeyHash,
+  Hash,
+  RawPublicKey,
+  Signature,
+} from "sigsum/dist/types";
 import { canonicalize } from "./canonicalize";
 
 export interface EnrollmentInput {
@@ -25,6 +40,32 @@ export interface EnrollmentOptions {
 const WEEK_SECONDS = 7 * 24 * 60 * 60;
 const YEAR_SECONDS = 365 * 24 * 60 * 60;
 const HEX_RE = /^[0-9a-fA-F]+$/;
+const WASM_EXTENSION = ".wasm";
+
+interface ManifestConfig {
+  app: string;
+  version: string;
+  default_csp: string;
+  default_index: string;
+  default_fallback: string;
+  wasm: string[];
+  extra_csp: Record<string, string>;
+}
+
+interface ManifestContent extends ManifestConfig {
+  files: Record<string, string>;
+  timestamp: string;
+}
+
+interface ManifestDocument {
+  manifest: ManifestContent;
+  signatures: Record<string, string>;
+}
+
+interface DirectoryScanResult {
+  files: Map<string, string>;
+  wasm: Set<string>;
+}
 
 function toBase64Url(input: Uint8Array | Buffer): string {
   return Buffer.from(input)
@@ -34,13 +75,13 @@ function toBase64Url(input: Uint8Array | Buffer): string {
     .replace(/=+$/g, "");
 }
 
-function parseSignerKey(value: string): string {
+function decodeKeyMaterial(value: string, name: string): Buffer {
   const trimmed = value.trim();
   let bytes: Buffer;
 
   if (HEX_RE.test(trimmed)) {
     if (trimmed.length % 2 !== 0) {
-      throw new Error("hex-encoded signer keys must contain an even number of characters");
+      throw new Error(`${name} must contain an even number of hex characters`);
     }
     bytes = Buffer.from(trimmed, "hex");
   } else {
@@ -48,15 +89,19 @@ function parseSignerKey(value: string): string {
     try {
       bytes = Buffer.from(normalized, "base64");
     } catch (err: any) {
-      throw new Error(`invalid base64 signer key: ${err.message}`);
+      throw new Error(`invalid base64 for ${name}: ${err.message}`);
     }
   }
 
   if (bytes.length !== 32) {
-    throw new Error("signer keys must be 32 bytes (ed25519 public keys)");
+    throw new Error(`${name} must be 32 bytes (ed25519 public keys)`);
   }
 
-  return toBase64Url(bytes);
+  return bytes;
+}
+
+function parseSignerKey(value: string): string {
+  return toBase64Url(decodeKeyMaterial(value, "signer keys"));
 }
 
 function parseInteger(value: number | string, name: string): number {
@@ -181,6 +226,269 @@ async function writeMaybe(filePath: string | undefined, contents: string): Promi
   }
 }
 
+function ensureNonEmptyString(value: any, name: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new Error(`${name} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function ensureAbsolutePath(value: any, name: string): string {
+  const normalized = ensureNonEmptyString(value, name);
+  if (!normalized.startsWith("/")) {
+    throw new Error(`${name} must start with '/'`);
+  }
+  return normalized;
+}
+
+function ensureRecordOfStrings(value: any, name: string): Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${name} must be an object`);
+  }
+  const record: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== "string" || raw.trim().length === 0) {
+      throw new Error(`${name} entries must be non-empty strings`);
+    }
+    record[key] = raw.trim();
+  }
+  return record;
+}
+
+async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
+  const raw = await readFile(configPath, "utf8");
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(`failed to parse manifest config JSON: ${err.message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("manifest config must be a JSON object");
+  }
+
+  const app = ensureNonEmptyString(parsed.app, "config.app");
+  try {
+    new URL(app);
+  } catch (err: any) {
+    throw new Error(`config.app must be a valid URL: ${err.message}`);
+  }
+
+  const version = ensureNonEmptyString(parsed.version, "config.version");
+  const defaultCsp = ensureNonEmptyString(parsed.default_csp, "config.default_csp");
+  const defaultIndex = ensureAbsolutePath(parsed.default_index, "config.default_index");
+  const defaultFallback = ensureAbsolutePath(parsed.default_fallback, "config.default_fallback");
+
+  let wasmList: string[] = [];
+  if (parsed.wasm === undefined) {
+    wasmList = [];
+  } else if (!Array.isArray(parsed.wasm)) {
+    throw new Error("config.wasm must be an array of strings");
+  } else {
+    wasmList = parsed.wasm.map((value: any, index: number) => {
+      if (typeof value !== "string" || value.trim().length === 0) {
+        throw new Error(`config.wasm[${index}] must be a non-empty string`);
+      }
+      return value.trim();
+    });
+  }
+
+  const extraCspRaw = parsed.extra_csp ?? {};
+  const extraCspRecord = ensureRecordOfStrings(extraCspRaw, "config.extra_csp");
+  for (const key of Object.keys(extraCspRecord)) {
+    if (!key.startsWith("/")) {
+      throw new Error(`config.extra_csp keys must start with '/': ${key}`);
+    }
+  }
+
+  return {
+    app,
+    version,
+    default_csp: defaultCsp,
+    default_index: defaultIndex,
+    default_fallback: defaultFallback,
+    wasm: wasmList,
+    extra_csp: extraCspRecord,
+  };
+}
+
+async function scanDirectory(rootDir: string): Promise<DirectoryScanResult> {
+  const absoluteRoot = path.resolve(rootDir);
+  const result: DirectoryScanResult = {
+    files: new Map(),
+    wasm: new Set(),
+  };
+
+  async function walk(currentDir: string, relativePrefix: string): Promise<void> {
+    const entries = await readdir(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const entryPath = path.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        const nextPrefix = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
+        await walk(entryPath, nextPrefix);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
+      const manifestPath = `/${relativePath}`;
+      const contents = await readFile(entryPath);
+      const digest = createHash("sha256").update(contents).digest();
+      const encoded = toBase64Url(digest);
+      if (path.extname(entry.name).toLowerCase() === WASM_EXTENSION) {
+        result.wasm.add(encoded);
+      } else {
+        result.files.set(manifestPath, encoded);
+      }
+    }
+  }
+
+  await walk(absoluteRoot, "");
+  return result;
+}
+
+async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {
+  const raw = await readFile(manifestPath, "utf8");
+  let parsed: any;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err: any) {
+    throw new Error(`failed to parse manifest JSON: ${err.message}`);
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    throw new Error("manifest file must contain a JSON object");
+  }
+  if (typeof parsed.manifest !== "object" || parsed.manifest === null || Array.isArray(parsed.manifest)) {
+    throw new Error("manifest file must include a 'manifest' object");
+  }
+  if (typeof parsed.signatures !== "object" || parsed.signatures === null || Array.isArray(parsed.signatures)) {
+    parsed.signatures = {};
+  }
+  const manifest = parsed.manifest;
+  if (typeof manifest.files !== "object" || manifest.files === null || Array.isArray(manifest.files)) {
+    throw new Error("manifest.manifest.files must be an object");
+  }
+  if (manifest.wasm === undefined) {
+    manifest.wasm = [];
+  } else if (!Array.isArray(manifest.wasm)) {
+    throw new Error("manifest.manifest.wasm must be an array");
+  }
+  if (manifest.extra_csp === undefined) {
+    manifest.extra_csp = {};
+  } else if (typeof manifest.extra_csp !== "object" || manifest.extra_csp === null || Array.isArray(manifest.extra_csp)) {
+    throw new Error("manifest.manifest.extra_csp must be an object");
+  }
+  if (typeof manifest.timestamp !== "string" || manifest.timestamp.length === 0) {
+    throw new Error("manifest.manifest.timestamp must be a string");
+  }
+  return parsed as ManifestDocument;
+}
+
+function parseCosignedTreeHead(text: string) {
+  const signedTreeHead: any = {};
+  const treeHead: any = {};
+  const cosignatures = new Map<Base64KeyHash, { Timestamp: number; Signature: Signature }>();
+  const lines = text.split(/\r?\n/);
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.length === 0) {
+      continue;
+    }
+    if (line.startsWith("cosignature=")) {
+      const [, rest] = line.split("=", 2);
+      const parts = rest.trim().split(/\s+/);
+      if (parts.length !== 3) {
+        throw new Error("invalid cosignature format in timestamp");
+      }
+      const [keyHashHex, timestampStr, signatureHex] = parts;
+      const timestamp = Number(timestampStr);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) {
+        throw new Error("invalid cosignature timestamp");
+      }
+      const signature = new Signature(hexToUint8Array(signatureHex));
+      cosignatures.set(new Base64KeyHash(hexToBase64(keyHashHex)), {
+        Timestamp: timestamp,
+        Signature: signature,
+      });
+      continue;
+    }
+    const [key, value] = line.split("=");
+    if (!key || value === undefined) {
+      continue;
+    }
+    if (key === "size" || key === "tree_size") {
+      const size = Number(value);
+      if (!Number.isFinite(size) || size <= 0) {
+        throw new Error("invalid tree size in timestamp");
+      }
+      treeHead.Size = size;
+      continue;
+    }
+    if (key === "root_hash") {
+      treeHead.RootHash = new Hash(hexToUint8Array(value));
+      continue;
+    }
+    if (key === "signature") {
+      signedTreeHead.Signature = new Signature(hexToUint8Array(value));
+      continue;
+    }
+  }
+  if (!treeHead.Size || !treeHead.RootHash) {
+    throw new Error("timestamp missing tree head fields");
+  }
+  if (!signedTreeHead.Signature) {
+    throw new Error("timestamp missing log signature");
+  }
+  signedTreeHead.TreeHead = treeHead;
+  return {
+    SignedTreeHead: signedTreeHead,
+    Cosignatures: cosignatures,
+  };
+}
+
+async function fetchTimestampFromPolicy(policyText: string): Promise<string> {
+  const policy = await parsePolicyText(policyText);
+  const availableLogs = Array.from(policy.logs.entries()).filter(([, entity]) => typeof entity.url === "string" && entity.url.length > 0);
+  if (availableLogs.length === 0) {
+    throw new Error("policy does not list any logs with URLs for timestamp retrieval");
+  }
+  const selected = availableLogs[Math.floor(Math.random() * availableLogs.length)];
+  const [, logEntity] = selected;
+  const baseUrl = (logEntity.url as string).replace(/\/+$/, "");
+  const requestUrl = `${baseUrl}/get-tree-head`;
+  let response: Response;
+  try {
+    response = await fetch(requestUrl);
+  } catch (err: any) {
+    throw new Error(`failed to fetch timestamp from ${requestUrl}: ${err.message}`);
+  }
+  if (!response.ok) {
+    throw new Error(`timestamp request failed (${response.status} ${response.statusText})`);
+  }
+  const body = await response.text();
+  const trimmed = body.trim();
+  const treeHead = parseCosignedTreeHead(trimmed);
+  const logKeyHash = await hashKey(logEntity.publicKey);
+  if (!(await verifySignedTreeHead(treeHead.SignedTreeHead, logEntity.publicKey, logKeyHash))) {
+    throw new Error("timestamp tree head signature is invalid");
+  }
+  const present = new Set<Base64KeyHash>();
+  for (const [keyHash, entity] of policy.witnesses) {
+    const cosig = Base64KeyHash.lookup(treeHead.Cosignatures, keyHash);
+    if (!cosig) {
+      continue;
+    }
+    if (await verifyCosignedTreeHead(treeHead.SignedTreeHead.TreeHead, entity.publicKey, logKeyHash, cosig)) {
+      present.add(keyHash);
+      if (policy.quorum.isQuorum(present)) {
+        return trimmed;
+      }
+    }
+  }
+  throw new Error("timestamp does not satisfy witness quorum");
+}
+
 const program = new Command();
 program.name("webcat-cli").description("Utilities for WEBCAT enrollment and manifest generation and validation");
 
@@ -243,11 +551,121 @@ enrollment
   });
 
 
-program
-  .command("manifest")
-  .description("Manifest helpers (reserved)")
-  .action(() => {
-    throw new Error("manifest commands wip");
+const manifest = program.command("manifest").description("Manifest helpers");
+
+manifest
+  .command("generate")
+  .description("Generate a manifest from a directory and config")
+  .requiredOption("-c, --config <path>", "Manifest config JSON file")
+  .requiredOption("-d, --directory <path>", "Directory containing site assets")
+  .requiredOption("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("-o, --output <path>", "Write manifest to a file instead of stdout")
+  .action(
+    async (options: {
+      config: string;
+      directory: string;
+      policyFile: string;
+      output?: string;
+    }) => {
+      const [config, scan, policyText] = await Promise.all([
+        loadManifestConfig(options.config),
+        scanDirectory(options.directory),
+        readFile(options.policyFile, "utf8"),
+      ]);
+      if (!scan.files.has(config.default_index)) {
+        throw new Error(`default_index ${config.default_index} was not found in the scanned files`);
+      }
+      if (!scan.files.has(config.default_fallback)) {
+        throw new Error(`default_fallback ${config.default_fallback} was not found in the scanned files`);
+      }
+      const timestamp = await fetchTimestampFromPolicy(policyText);
+      const filesObject = Object.fromEntries(
+        Array.from(scan.files.entries()).sort(([a], [b]) => a.localeCompare(b))
+      );
+      const wasmList = Array.from(new Set([...config.wasm, ...scan.wasm])).sort();
+      const extraCsp = Object.fromEntries(
+        Object.entries(config.extra_csp).sort(([a], [b]) => a.localeCompare(b))
+      );
+      const manifestDocument: ManifestDocument = {
+        manifest: {
+          app: config.app,
+          version: config.version,
+          default_csp: config.default_csp,
+          files: filesObject,
+          default_index: config.default_index,
+          default_fallback: config.default_fallback,
+          timestamp,
+          wasm: wasmList,
+          extra_csp: extraCsp,
+        },
+        signatures: {},
+      };
+      const json = JSON.stringify(manifestDocument, null, 2);
+      await writeMaybe(options.output, json);
+    }
+  );
+
+manifest
+  .command("sign")
+  .description("Attach a verified Sigsum proof to a manifest")
+  .requiredOption("-i, --input <path>", "Manifest file to sign")
+  .requiredOption("-p, --policy-file <path>", "Sigsum policy file for verification")
+  .requiredOption("-s, --signer <key>", "Signer public key (hex or base64)")
+  .requiredOption("-f, --proof <path>", "Sigsum proof file to attach")
+  .option("-o, --output <path>", "Write updated manifest to a file")
+  .action(
+    async (options: {
+      input: string;
+      policyFile: string;
+      signer: string;
+      proof: string;
+      output?: string;
+    }) => {
+      const document = await loadManifestDocument(options.input);
+      const canonicalManifest = canonicalize(document.manifest);
+      const manifestHash = createHash("sha256").update(canonicalManifest).digest();
+      const signerBytes = decodeKeyMaterial(options.signer, "signer public key");
+      const [policyText, proofTextRaw] = await Promise.all([
+        readFile(options.policyFile, "utf8"),
+        readFile(options.proof, "utf8"),
+      ]);
+      const proofText = proofTextRaw.trim();
+      await verifyHash(
+        new Uint8Array(manifestHash),
+        new RawPublicKey(new Uint8Array(signerBytes)),
+        policyText,
+        proofText
+      );
+      const signerKey = toBase64Url(signerBytes);
+      if (document.signatures[signerKey]) {
+        throw new Error("manifest already contains a signature for this signer");
+      }
+      document.signatures[signerKey] = proofText;
+      const json = JSON.stringify(document, null, 2);
+      await writeMaybe(options.output, json);
+    }
+  );
+
+manifest
+  .command("canonicalize")
+  .description("Canonicalize a manifest JSON file")
+  .requiredOption("-i, --input <path>", "Manifest file to canonicalize")
+  .option("-o, --output <path>", "Write canonical JSON to a file")
+  .action(async (options: { input: string; output?: string }) => {
+    const document = await loadManifestDocument(options.input);
+    const canonical = canonicalize(document);
+    await writeMaybe(options.output, canonical);
+  });
+
+manifest
+  .command("hash")
+  .description("Canonicalize and hash a manifest file")
+  .requiredOption("-i, --input <path>", "Manifest file to hash")
+  .action(async (options: { input: string }) => {
+    const document = await loadManifestDocument(options.input);
+    const canonical = canonicalize(document);
+    const digest = createHash("sha256").update(canonical).digest();
+    process.stdout.write(toBase64Url(digest) + "\n");
   });
 
 program
