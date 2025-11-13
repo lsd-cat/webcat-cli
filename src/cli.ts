@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { Command } from "commander";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import process from "node:process";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { compilePolicy } from "sigsum/dist/policyCompiler";
 import { parsePolicyText } from "sigsum/dist/config";
 import {
@@ -12,11 +14,9 @@ import {
   verifySignedTreeHead,
 } from "sigsum/dist/crypto";
 import { hexToBase64, hexToUint8Array } from "sigsum/dist/encoding";
-import { verifyHash } from "sigsum/dist/verify";
 import {
   Base64KeyHash,
   Hash,
-  RawPublicKey,
   Signature,
 } from "sigsum/dist/types";
 import { canonicalize } from "./canonicalize";
@@ -385,6 +385,32 @@ async function loadManifestDocument(manifestPath: string): Promise<ManifestDocum
   return parsed as ManifestDocument;
 }
 
+function canonicalizeManifestBody(document: ManifestDocument): string {
+  return canonicalize(document.manifest);
+}
+
+async function runSigsumSubmit(policyPath: string, keyPath: string, payloadPath: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn("sigsum-submit", ["-p", policyPath, "-k", keyPath, payloadPath], {
+      stdio: "inherit",
+    });
+    child.on("error", (err) => {
+      reject(new Error(`failed to launch sigsum-submit: ${err.message}`));
+    });
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      if (signal) {
+        reject(new Error(`sigsum-submit terminated via signal ${signal}`));
+      } else {
+        reject(new Error(`sigsum-submit exited with code ${code ?? 1}`));
+      }
+    });
+  });
+}
+
 function parseCosignedTreeHead(text: string) {
   const signedTreeHead: any = {};
   const treeHead: any = {};
@@ -607,42 +633,49 @@ manifest
 
 manifest
   .command("sign")
-  .description("Attach a verified Sigsum proof to a manifest")
+  .description("Use sigsum-submit to sign a manifest and attach the proof")
   .requiredOption("-i, --input <path>", "Manifest file to sign")
-  .requiredOption("-p, --policy-file <path>", "Sigsum policy file for verification")
+  .requiredOption("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
+  .requiredOption("-k, --key <path>", "Sigsum private key for signing")
   .requiredOption("-s, --signer <key>", "Signer public key (hex or base64)")
-  .requiredOption("-f, --proof <path>", "Sigsum proof file to attach")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(
     async (options: {
       input: string;
       policyFile: string;
+      key: string;
       signer: string;
-      proof: string;
       output?: string;
     }) => {
       const document = await loadManifestDocument(options.input);
-      const canonicalManifest = canonicalize(document.manifest);
-      const manifestHash = createHash("sha256").update(canonicalManifest).digest();
+      const canonicalManifest = canonicalizeManifestBody(document);
       const signerBytes = decodeKeyMaterial(options.signer, "signer public key");
-      const [policyText, proofTextRaw] = await Promise.all([
-        readFile(options.policyFile, "utf8"),
-        readFile(options.proof, "utf8"),
-      ]);
-      const proofText = proofTextRaw.trim();
-      await verifyHash(
-        new Uint8Array(manifestHash),
-        new RawPublicKey(new Uint8Array(signerBytes)),
-        policyText,
-        proofText
-      );
       const signerKey = toBase64Url(signerBytes);
       if (document.signatures[signerKey]) {
         throw new Error("manifest already contains a signature for this signer");
       }
-      document.signatures[signerKey] = proofText;
-      const json = JSON.stringify(document, null, 2);
-      await writeMaybe(options.output, json);
+      const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
+      const tempFile = path.join(tempDir, "manifest.json");
+      try {
+        await writeFile(tempFile, canonicalManifest);
+        await runSigsumSubmit(options.policyFile, options.key, tempFile);
+        const proofPath = `${tempFile}.proof`;
+        let proofText: string;
+        try {
+          const proofRaw = await readFile(proofPath, "utf8");
+          proofText = proofRaw.trim();
+        } catch (err: any) {
+          throw new Error(`failed to read Sigsum proof (${err.message})`);
+        }
+        if (proofText.length === 0) {
+          throw new Error("Sigsum proof was empty");
+        }
+        document.signatures[signerKey] = proofText;
+        const json = JSON.stringify(document, null, 2);
+        await writeMaybe(options.output, json);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
     }
   );
 
@@ -653,7 +686,7 @@ manifest
   .option("-o, --output <path>", "Write canonical JSON to a file")
   .action(async (options: { input: string; output?: string }) => {
     const document = await loadManifestDocument(options.input);
-    const canonical = canonicalize(document);
+    const canonical = canonicalizeManifestBody(document);
     await writeMaybe(options.output, canonical);
   });
 
@@ -663,17 +696,34 @@ manifest
   .requiredOption("-i, --input <path>", "Manifest file to hash")
   .action(async (options: { input: string }) => {
     const document = await loadManifestDocument(options.input);
-    const canonical = canonicalize(document);
+    const canonical = canonicalizeManifestBody(document);
     const digest = createHash("sha256").update(canonical).digest();
     process.stdout.write(toBase64Url(digest) + "\n");
   });
 
-program
-  .command("bundle")
-  .description("Bundle helpers (reserved)")
-  .action(() => {
-    throw new Error("bundle commands will wip");
-  });
+const bundle = program.command("bundle").description("Bundle helpers");
+
+bundle
+  .command("create")
+  .description("Create a bundle from enrollment and a signed manifest")
+  .requiredOption("-e, --enrollment <path>", "Enrollment JSON file")
+  .requiredOption("-m, --manifest <path>", "Signed manifest JSON file")
+  .option("-o, --output <path>", "Write bundle JSON to a file")
+  .action(
+    async (options: { enrollment: string; manifest: string; output?: string }) => {
+      const [enrollment, manifestDocument] = await Promise.all([
+        loadEnrollment(options.enrollment),
+        loadManifestDocument(options.manifest),
+      ]);
+      const bundleDocument = {
+        enrollment,
+        manifest: manifestDocument.manifest,
+        signatures: manifestDocument.signatures,
+      };
+      const json = JSON.stringify(bundleDocument, null, 2);
+      await writeMaybe(options.output, json);
+    }
+  );
 
 
 program.parseAsync(process.argv).catch((err: any) => {
