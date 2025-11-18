@@ -277,7 +277,10 @@ async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
 
   const version = ensureNonEmptyString(parsed.version, "config.version");
   const defaultCsp = ensureNonEmptyString(parsed.default_csp, "config.default_csp");
-  const defaultIndex = ensureAbsolutePath(parsed.default_index, "config.default_index");
+  // Remove leading / to default_index. It is automatically appended to dirs whcih
+  // have a ending /
+  let defaultIndex = ensureNonEmptyString(parsed.default_index, "config.default_index");
+  defaultIndex = defaultIndex.replace(/^\/+/, ""); // optional: normalize if user wrote "/index.html"
   const defaultFallback = ensureAbsolutePath(parsed.default_fallback, "config.default_fallback");
 
   let wasmList: string[] = [];
@@ -654,7 +657,8 @@ manifest
         scanDirectory(options.directory),
         readFile(options.policyFile, "utf8"),
       ]);
-      if (!scan.files.has(config.default_index)) {
+      const indexKey = "/" + config.default_index.replace(/^\/+/, "");
+      if (!scan.files.has(indexKey)) {
         throw new Error(`default_index ${config.default_index} was not found in the scanned files`);
       }
       if (!scan.files.has(config.default_fallback)) {
