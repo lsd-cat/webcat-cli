@@ -256,6 +256,57 @@ function ensureRecordOfStrings(value: any, name: string): Record<string, string>
   return record;
 }
 
+function runSigsumKeyToHex(pubKeyPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "sigsum-key",
+      ["to-hex", "-k", pubKeyPath],
+      { stdio: ["ignore", "pipe", "pipe"] } // capture stdout
+    );
+
+    let output = "";
+    let errout = "";
+
+    child.stdout.on("data", (d) => output += d.toString());
+    child.stderr.on("data", (d) => errout += d.toString());
+
+    child.on("error", (err) => {
+      reject(new Error(`failed to launch sigsum-key: ${err.message}`));
+    });
+
+    child.on("exit", (code, signal) => {
+      if (code === 0) {
+        resolve(output.trim());
+      } else if (signal) {
+        reject(new Error(`sigsum-key terminated via signal ${signal}`));
+      } else {
+        reject(new Error(`sigsum-key exited with code ${code}: ${errout.trim()}`));
+      }
+    });
+  });
+}
+
+function hexToBase64Url(hex: string): string {
+  const buf = Buffer.from(hex, "hex");
+  return buf.toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+async function deriveSignerKeyFromPrivateKey(privKeyPath: string): Promise<string> {
+  const pubPath = `${privKeyPath}.pub`;
+
+  const hex = await runSigsumKeyToHex(pubPath);
+
+  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error(`sigsum-key returned invalid hex for ${pubPath}: ${hex}`);
+  }
+
+  return hexToBase64Url(hex);
+}
+
+
 async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
   const raw = await readFile(configPath, "utf8");
   let parsed: any;
@@ -697,7 +748,6 @@ manifest
   .requiredOption("-i, --input <path>", "Manifest file to sign")
   .requiredOption("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
   .requiredOption("-k, --key <path>", "Sigsum private key for signing")
-  .requiredOption("-s, --signer <key>", "Signer public key (hex or base64)")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(
     async (options: {
@@ -709,8 +759,7 @@ manifest
     }) => {
       const document = await loadManifestDocument(options.input);
       const canonicalManifest = canonicalizeManifestBody(document);
-      const signerBytes = decodeKeyMaterial(options.signer, "signer public key");
-      const signerKey = toBase64Url(signerBytes);
+      const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
       if (document.signatures[signerKey]) {
         throw new Error("manifest already contains a signature for this signer");
       }
