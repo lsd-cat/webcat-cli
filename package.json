@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "commander": "^14.0.2",
-    "sigsum": "^0.3.4"
+    "@freedomofpress/sigsum": "^0.3.4"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",

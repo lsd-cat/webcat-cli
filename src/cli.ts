@@ -6,16 +6,16 @@ import { createHash } from "node:crypto";
 import process from "node:process";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { compilePolicy } from "sigsum/dist/policyCompiler";
-import { parsePolicyText } from "sigsum/dist/config";
+import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
+import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
 import {
   hashKey,
   verifyCosignedTreeHead,
   verifySignedTreeHead,
-} from "sigsum/dist/crypto";
-import { hexToBase64, hexToUint8Array } from "sigsum/dist/encoding";
-import { Base64KeyHash, Hash, RawPublicKey, Signature } from "sigsum/dist/types";
-import { verifyHashWithCompiledPolicy } from "sigsum/dist/verify";
+} from "@freedomofpress/sigsum/dist/crypto";
+import { hexToBase64, hexToUint8Array } from "@freedomofpress/sigsum/dist/encoding";
+import { Base64KeyHash, Hash, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
+import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
 import { canonicalize } from "./canonicalize";
 
 export interface EnrollmentInput {
