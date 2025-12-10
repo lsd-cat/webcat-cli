@@ -666,7 +666,7 @@ enrollment
 enrollment
   .command("canonicalize")
   .description("Canonicalize an enrollment JSON file")
-  .requiredOption("-i, --input <path>", "Enrollment file to canonicalize")
+  .requiredOption("-e, --enrollment <path>", "Enrollment file to canonicalize")
   .option("-o, --output <path>", "Write canonical JSON to a file")
   .action(async (options: { input: string; output?: string }) => {
     const enrollmentObject = await loadEnrollment(options.input);
@@ -802,7 +802,7 @@ manifest
 manifest
   .command("hash")
   .description("Canonicalize and hash a manifest file")
-  .requiredOption("-i, --input <path>", "Manifest file to hash")
+  .requiredOption("-m, --manifest <path>", "Manifest file to hash")
   .action(async (options: { input: string }) => {
     const document = await loadManifestDocument(options.input);
     const canonical = canonicalizeManifestBody(document);
@@ -816,8 +816,8 @@ manifest
     "Verify that a manifest (or bundle) satisfies the enrollment signer threshold",
   )
   .argument(
-    "<enrollment-or-bundle>",
-    "Path to an enrollment JSON file or to a bundle JSON file",
+    "<bundle>",
+    "Path to a bundle JSON file",
   )
   .argument(
     "[manifest]",
