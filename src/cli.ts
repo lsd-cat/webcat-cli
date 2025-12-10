@@ -460,14 +460,6 @@ function decodePolicyBytes(encoded: string): Uint8Array {
   }
 }
 
-function normalizeProofText(proofText: string): string {
-  const versionMatch = proofText.match(/version=(\d+)/);
-  if (versionMatch?.[1] === "2" && !/\btree_size=/.test(proofText)) {
-    return proofText.replace(/(^|\n)size=/g, "$1tree_size=");
-  }
-  return proofText;
-}
-
 async function loadBundleDocument(bundlePath: string): Promise<{
   enrollment: EnrollmentInput;
   manifest: ManifestDocument;
@@ -859,12 +851,11 @@ manifest
           const signerKey = new RawPublicKey(
             new Uint8Array(decodeKeyMaterial(signer, "enrollment signer")),
           );
-          const normalizedProof = normalizeProofText(proofText);
           const ok = await verifyHashWithCompiledPolicy(
             manifestHash,
             signerKey,
             compiledPolicy,
-            normalizedProof,
+            proofText,
           );
           if (ok) {
             verified += 1;
