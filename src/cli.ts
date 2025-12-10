@@ -908,7 +908,32 @@ bundle
   );
 
 
-program.parseAsync(process.argv).catch((err: any) => {
-  process.stderr.write(`Error: ${err.message}\n`);
-  process.exit(1);
-});
+export const testExports = {
+  toBase64Url,
+  decodeKeyMaterial,
+  parseSignerKey,
+  parseInteger,
+  validateMaxAge,
+  validateCasUrl,
+  buildEnrollmentObject,
+  parseEnrollmentObject,
+  loadEnrollment,
+  ensureNonEmptyString,
+  ensureAbsolutePath,
+  ensureRecordOfStrings,
+  loadManifestConfig,
+  scanDirectory,
+  parseManifestDocumentObject,
+  loadManifestDocument,
+  canonicalizeManifestBody,
+  decodePolicyBytes,
+  loadBundleDocument,
+  hexToBase64Url,
+};
+
+if (process.env.NODE_ENV !== "test") {
+  program.parseAsync(process.argv).catch((err: any) => {
+    process.stderr.write(`Error: ${err.message}\n`);
+    process.exit(1);
+  });
+}
