@@ -3,29 +3,26 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { testExports } from "../src/cli";
-
-const {
-  toBase64Url,
-  decodeKeyMaterial,
-  parseSignerKey,
-  parseInteger,
-  validateMaxAge,
-  validateCasUrl,
+import {
   buildEnrollmentObject,
-  parseEnrollmentObject,
-  loadEnrollment,
-  ensureNonEmptyString,
+  decodeKeyMaterial,
   ensureAbsolutePath,
+  ensureNonEmptyString,
   ensureRecordOfStrings,
-  loadManifestConfig,
-  scanDirectory,
-  parseManifestDocumentObject,
-  loadManifestDocument,
-  decodePolicyBytes,
-  loadBundleDocument,
   hexToBase64Url,
-} = testExports;
+  loadBundleDocument,
+  loadEnrollment,
+  loadManifestConfig,
+  loadManifestDocument,
+  parseEnrollmentObject,
+  parseInteger,
+  parseManifestDocumentObject,
+  parseSignerKey,
+  scanDirectory,
+  toBase64Url,
+  validateCasUrl,
+  validateMaxAge,
+} from "../src/test-exports";
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
