@@ -210,8 +210,12 @@ manifest
         const checksum = new Hash(createHash("sha256").update(messageHash).digest());
         const leaf = new Leaf(checksum, new Signature(proof.leaf.Signature.bytes), new KeyHash(proof.leaf.KeyHash.bytes));
         const leafBytes = leaf.toBytes();
-        const { hash, filePath } = await writeCasObject(leafBytes);
-        process.stdout.write(`Saved raw Sigsum leaf to ${filePath} (sha256=${hash}).\n`);
+        const { hash: leafHash, filePath: leafPath } = await writeCasObject(leafBytes);
+        process.stdout.write(`Saved raw Sigsum leaf to ${leafPath} (sha256=${leafHash}).\n`);
+        const { hash: checksumHash, filePath: checksumPath } = await writeCasObject(messageHash);
+        process.stdout.write(`Saved Sigsum checksum payload to ${checksumPath} (sha256=${checksumHash}).\n`);
+        const { hash: manifestHash, filePath: manifestPath } = await writeCasObject(canonicalManifest);
+        process.stdout.write(`Saved canonical manifest to ${manifestPath} (sha256=${manifestHash}).\n`);
         document.signatures[signerKey] = proofText;
         const json = JSON.stringify(document, null, 2);
         await writeMaybe(options.output, json);
