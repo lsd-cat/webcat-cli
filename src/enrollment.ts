@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import {
   decodeKeyMaterial,
+  ensureRecordOfStrings,
   parseInteger,
   toBase64Url,
   validateCasUrl,
@@ -13,6 +14,7 @@ export interface EnrollmentInput {
   threshold: number;
   max_age: number;
   cas_url: string;
+  logs?: Record<string, string>;
 }
 
 export interface EnrollmentOptions {
@@ -21,6 +23,7 @@ export interface EnrollmentOptions {
   threshold: number | string;
   maxAge: number | string;
   casUrl: string;
+  logs?: Record<string, string>;
 }
 
 export function parseSignerKey(value: string): string {
@@ -33,6 +36,7 @@ export function buildEnrollmentObject({
   threshold,
   maxAge,
   casUrl,
+  logs,
 }: EnrollmentOptions): EnrollmentInput {
   if (signers.length === 0) {
     throw new Error("at least one signer must be provided");
@@ -56,12 +60,15 @@ export function buildEnrollmentObject({
   validateMaxAge(parsedMaxAge);
   validateCasUrl(casUrl);
 
+  const normalizedLogs = logs ? ensureRecordOfStrings(logs, "logs") : undefined;
+
   return {
     policy,
     signers: unique,
     threshold: parsedThreshold,
     max_age: parsedMaxAge,
     cas_url: casUrl,
+    ...(normalizedLogs ? { logs: normalizedLogs } : {}),
   };
 }
 
@@ -91,6 +98,10 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
   const maxAge = parseInteger(parsed.max_age, "max-age");
   validateMaxAge(maxAge);
   validateCasUrl(parsed.cas_url);
+
+  if (parsed.logs !== undefined) {
+    ensureRecordOfStrings(parsed.logs, "enrollment.logs");
+  }
 
   return parsed as EnrollmentInput;
 }
