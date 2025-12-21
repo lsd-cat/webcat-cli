@@ -7,10 +7,12 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
 import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
-import { RawPublicKey } from "@freedomofpress/sigsum/dist/types";
+import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
 import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
+import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
 import { canonicalize } from "./canonicalize";
 import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
+import { writeCasObject } from "./cas";
 import {
   ManifestDocument,
   canonicalizeManifestBody,
@@ -82,6 +84,8 @@ enrollment
     });
 
     const json = JSON.stringify(enrollmentObject, null, 2);
+    const { hash, filePath } = await writeCasObject(json);
+    process.stdout.write(`Saved enrollment to ${filePath} (sha256=${hash}).\n`);
     await writeMaybe(options.output, json);
   });
 
@@ -201,6 +205,12 @@ manifest
         if (proofText.length === 0) {
           throw new Error("Sigsum proof was empty");
         }
+        const proof = await SigsumProof.fromAscii(proofText);
+        const checksum = new Hash(createHash("sha256").update(canonicalManifest).digest());
+        const leaf = new Leaf(checksum, new Signature(proof.leaf.Signature.bytes), new KeyHash(proof.leaf.KeyHash.bytes));
+        const leafBytes = leaf.toBytes();
+        const { hash, filePath } = await writeCasObject(leafBytes);
+        process.stdout.write(`Saved raw Sigsum leaf to ${filePath} (sha256=${hash}).\n`);
         document.signatures[signerKey] = proofText;
         const json = JSON.stringify(document, null, 2);
         await writeMaybe(options.output, json);
