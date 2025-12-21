@@ -206,7 +206,8 @@ manifest
           throw new Error("Sigsum proof was empty");
         }
         const proof = await SigsumProof.fromAscii(proofText);
-        const checksum = new Hash(createHash("sha256").update(canonicalManifest).digest());
+        const messageHash = createHash("sha256").update(canonicalManifest).digest();
+        const checksum = new Hash(createHash("sha256").update(messageHash).digest());
         const leaf = new Leaf(checksum, new Signature(proof.leaf.Signature.bytes), new KeyHash(proof.leaf.KeyHash.bytes));
         const leafBytes = leaf.toBytes();
         const { hash, filePath } = await writeCasObject(leafBytes);
