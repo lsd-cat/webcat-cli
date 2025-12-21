@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
+import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
 import {
   buildEnrollmentObject,
   decodeKeyMaterial,
@@ -23,6 +24,7 @@ import {
   validateCasUrl,
   validateMaxAge,
 } from "../src/test-exports";
+import { writeCasObject } from "../src/cas";
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -213,6 +215,39 @@ describe("string and path validation", () => {
       "record entries must be non-empty strings",
     );
     expect(ensureRecordOfStrings({ a: "x" }, "record")).toEqual({ a: "x" });
+  });
+});
+
+describe("CAS resolution", () => {
+  it("resolves from leaf checksum to manifest via CAS", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const canonicalManifest = JSON.stringify({ manifest: { app: "demo" }, signatures: {} });
+      const messageHash = createHash("sha256").update(canonicalManifest).digest();
+      const checksum = new Hash(createHash("sha256").update(messageHash).digest());
+      const signature = new Signature(new Uint8Array(64));
+      const keyHash = new KeyHash(new Uint8Array(32));
+      const leafBytes = new Leaf(checksum, signature, keyHash).toBytes();
+
+      const { hash: leafHash } = await writeCasObject(leafBytes);
+      await writeCasObject(messageHash);
+      await writeCasObject(canonicalManifest);
+
+      const storedLeaf = await readFile(path.join(dir, "cas", leafHash));
+      const storedChecksum = storedLeaf.subarray(1, 33);
+      const checksumHex = Buffer.from(storedChecksum).toString("hex");
+
+      const storedMessageHash = await readFile(path.join(dir, "cas", checksumHex));
+      const messageHashHex = Buffer.from(storedMessageHash).toString("hex");
+
+      const storedManifest = await readFile(path.join(dir, "cas", messageHashHex), "utf8");
+      expect(storedManifest).toBe(canonicalManifest);
+    } finally {
+      process.chdir(cwd);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
