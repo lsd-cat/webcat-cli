@@ -6,6 +6,7 @@ import process from "node:process";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
+import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
 import { RawPublicKey } from "@freedomofpress/sigsum/dist/types";
 import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
 import { canonicalize } from "./canonicalize";
@@ -59,6 +60,17 @@ enrollment
     const policyText = await readFile(options.policyFile, "utf8");
     const compiled = await compilePolicy(policyText);
     const policyEncoded = toBase64Url(compiled);
+    const parsedPolicy = await parsePolicyText(policyText);
+    const logsEntries = await Promise.all(
+      Array.from(parsedPolicy.logs.values()).map(async (entity) => {
+        const rawKey = await crypto.subtle.exportKey("raw", entity.publicKey.key);
+        const key = toBase64Url(new Uint8Array(rawKey));
+        const url = typeof entity.url === "string" ? entity.url : "";
+        return [key, url] as const;
+      })
+    );
+    logsEntries.sort(([a], [b]) => a.localeCompare(b));
+    const logs = Object.fromEntries(logsEntries);
 
     const enrollmentObject = buildEnrollmentObject({
       policy: policyEncoded,
@@ -66,6 +78,7 @@ enrollment
       threshold: options.threshold,
       maxAge: options.maxAge,
       casUrl: options.casUrl,
+      logs,
     });
 
     const json = JSON.stringify(enrollmentObject, null, 2);
