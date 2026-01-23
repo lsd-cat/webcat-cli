@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import type { SerializedBundle } from "@sigstore/bundle";
 import { canonicalize } from "./canonicalize";
 import {
   ensureAbsolutePath,
@@ -28,7 +29,12 @@ export interface ManifestContent extends ManifestConfig {
 
 export interface ManifestDocument {
   manifest: ManifestContent;
-  signatures: Record<string, string>;
+  signatures: ManifestSignatures;
+}
+
+export interface ManifestSignatures {
+  sigsum?: Record<string, string>;
+  sigstore?: SerializedBundle[];
 }
 
 export interface DirectoryScanResult {
@@ -139,10 +145,7 @@ export function parseManifestDocumentObject(parsed: any): ManifestDocument {
   if (typeof parsed.manifest !== "object" || parsed.manifest === null || Array.isArray(parsed.manifest)) {
     throw new Error("manifest file must include a 'manifest' object");
   }
-  if (typeof parsed.signatures !== "object" || parsed.signatures === null || Array.isArray(parsed.signatures)) {
-    parsed.signatures = {};
-  }
-  parsed.signatures = ensureRecordOfStrings(parsed.signatures, "signatures");
+  parsed.signatures = parseManifestSignatures(parsed.signatures);
   const manifest = parsed.manifest;
   if (typeof manifest.files !== "object" || manifest.files === null || Array.isArray(manifest.files)) {
     throw new Error("manifest.manifest.files must be an object");
@@ -161,6 +164,40 @@ export function parseManifestDocumentObject(parsed: any): ManifestDocument {
     throw new Error("manifest.manifest.timestamp must be a string");
   }
   return parsed as ManifestDocument;
+}
+
+function parseManifestSignatures(value: any): ManifestSignatures {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("signatures must be an object");
+  }
+
+  const hasSigsum = Object.prototype.hasOwnProperty.call(value, "sigsum");
+  const hasSigstore = Object.prototype.hasOwnProperty.call(value, "sigstore");
+
+  if (!hasSigsum && !hasSigstore) {
+    return { sigsum: ensureRecordOfStrings(value, "signatures") };
+  }
+
+  const signatures: ManifestSignatures = {};
+  if (hasSigsum) {
+    signatures.sigsum = ensureRecordOfStrings(value.sigsum ?? {}, "signatures.sigsum");
+  }
+  if (hasSigstore) {
+    if (!Array.isArray(value.sigstore)) {
+      throw new Error("signatures.sigstore must be an array");
+    }
+    value.sigstore.forEach((entry: any, index: number) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw new Error(`signatures.sigstore[${index}] must be an object`);
+      }
+    });
+    signatures.sigstore = value.sigstore as SerializedBundle[];
+  }
+
+  return signatures;
 }
 
 export async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 import path from "node:path";
 import { tmpdir } from "node:os";
@@ -10,6 +11,17 @@ import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
 import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
 import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
 import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
+import { bundleToJSON } from "@sigstore/bundle";
+import {
+  CIContextProvider,
+  DEFAULT_FULCIO_URL,
+  DEFAULT_REKOR_URL,
+  DSSEBundleBuilder,
+  FulcioSigner,
+  MessageSignatureBundleBuilder,
+  RekorWitness,
+  TSAWitness,
+} from "@sigstore/sign";
 import { Updater } from "tuf-js";
 import { canonicalize } from "./canonicalize";
 import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
@@ -29,6 +41,28 @@ const SIGSTORE_TUF_BASE_URL = "https://tuf-repo-cdn.sigstore.dev";
 const SIGSTORE_TUF_ROOT_URL = `${SIGSTORE_TUF_BASE_URL}/1.root.json`;
 const SIGSTORE_TUF_TARGETS_URL = `${SIGSTORE_TUF_BASE_URL}/targets`;
 const SIGSTORE_TRUSTED_ROOT_TARGET = "trusted_root.json";
+const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
+const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
+const SIGSTORE_OIDC_SCOPE = "openid email";
+
+type DeviceAuthResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval?: number;
+};
+
+type OidcConfig = {
+  device_authorization_endpoint?: string;
+  token_endpoint?: string;
+};
+
+type PkcePair = {
+  verifier: string;
+  challenge: string;
+};
 
 async function writeMaybe(filePath: string | undefined, contents: string): Promise<void> {
   if (filePath) {
@@ -73,6 +107,146 @@ async function fetchSigstoreCommunityTrustedRoot(): Promise<string> {
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+}
+
+async function fetchOidcConfiguration(issuer: string): Promise<OidcConfig> {
+  const trimmed = issuer.replace(/\/+$/, "");
+  const response = await fetch(`${trimmed}/.well-known/openid-configuration`);
+  if (!response.ok) {
+    throw new Error(`failed to load OIDC configuration (${response.status} ${response.statusText})`);
+  }
+  const parsed = (await response.json()) as OidcConfig;
+  return parsed;
+}
+
+async function requestDeviceAuthorization(
+  issuer: string,
+  clientId: string,
+  scope: string,
+  pkce: PkcePair,
+): Promise<DeviceAuthResponse> {
+  const config = await fetchOidcConfiguration(issuer);
+  if (!config.device_authorization_endpoint) {
+    throw new Error("OIDC configuration is missing device authorization endpoint");
+  }
+  const response = await fetch(config.device_authorization_endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      scope,
+      code_challenge: pkce.challenge,
+      code_challenge_method: "S256",
+    }).toString(),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `failed to request device authorization (${response.status} ${response.statusText})`,
+    );
+  }
+  return (await response.json()) as DeviceAuthResponse;
+}
+
+async function exchangeDeviceCode(
+  issuer: string,
+  clientId: string,
+  deviceCode: string,
+  intervalSeconds: number,
+  pkce: PkcePair,
+): Promise<string> {
+  const config = await fetchOidcConfiguration(issuer);
+  if (!config.token_endpoint) {
+    throw new Error("OIDC configuration is missing token endpoint");
+  }
+  let interval = Math.max(intervalSeconds, 1);
+  const started = Date.now();
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+    const response = await fetch(config.token_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: clientId,
+        code_verifier: pkce.verifier,
+      }).toString(),
+    });
+    const payload = (await response.json()) as {
+      access_token?: string;
+      id_token?: string;
+      error?: string;
+    };
+    if (payload.id_token) {
+      return payload.id_token;
+    }
+    if (payload.access_token) {
+      throw new Error("OIDC device authorization returned access_token but no id_token");
+    }
+    if (payload.error === "authorization_pending") {
+      continue;
+    }
+    if (payload.error === "slow_down") {
+      interval += 5;
+      continue;
+    }
+    if (payload.error === "expired_token") {
+      throw new Error("OIDC device code expired before authorization completed");
+    }
+    if (payload.error) {
+      throw new Error(`OIDC device authorization failed: ${payload.error}`);
+    }
+    if (Date.now() - started > 10 * 60 * 1000) {
+      throw new Error("OIDC device authorization timed out");
+    }
+  }
+}
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  let command: string;
+  let args: string[];
+  if (platform === "darwin") {
+    command = "open";
+    args = [url];
+  } else if (platform === "win32") {
+    command = "cmd";
+    args = ["/c", "start", "", url];
+  } else {
+    command = "xdg-open";
+    args = [url];
+  }
+  try {
+    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // Best-effort only.
+  }
+}
+
+async function fetchInteractiveOidcToken(
+  issuer: string,
+  clientId: string,
+  scope: string,
+  openBrowserWindow: boolean,
+): Promise<string> {
+  const pkce = createPkcePair();
+  const deviceAuth = await requestDeviceAuthorization(issuer, clientId, scope, pkce);
+  const verificationUrl = deviceAuth.verification_uri_complete ?? deviceAuth.verification_uri;
+  process.stdout.write(
+    `Open ${verificationUrl} in a browser and enter code ${deviceAuth.user_code} to authenticate.\n`,
+  );
+  if (openBrowserWindow) {
+    openBrowser(verificationUrl);
+  }
+  const interval = deviceAuth.interval ?? 5;
+  return await exchangeDeviceCode(issuer, clientId, deviceAuth.device_code, interval, pkce);
+}
+
+function createPkcePair(): PkcePair {
+  const verifier = toBase64Url(randomBytes(32));
+  const challenge = toBase64Url(createHash("sha256").update(verifier).digest());
+  return { verifier, challenge };
 }
 
 function parseTrustedRootJson(value: string, source: string): Record<string, unknown> {
@@ -271,7 +445,7 @@ manifest
           wasm: wasmList,
           extra_csp: extraCsp,
         },
-        signatures: {},
+        signatures: { sigsum: {} },
       };
       const json = JSON.stringify(manifestDocument, null, 2);
       await writeMaybe(options.output, json);
@@ -280,62 +454,161 @@ manifest
 
 manifest
   .command("sign")
-  .description("Use sigsum-submit to sign a manifest and attach the proof")
+  .description("Sign a manifest with sigsum (default) or sigstore")
+  .option("--type <type>", "Signature type (sigsum or sigstore)", "sigsum")
   .requiredOption("-i, --input <path>", "Manifest file to sign")
-  .requiredOption("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
-  .requiredOption("-k, --key <path>", "Sigsum private key for signing")
+  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
+  .option("-k, --key <path>", "Sigsum private key for signing")
+  .option(
+    "--bundle-type <type>",
+    "Sigstore bundle type to generate (message or dsse)",
+    "message",
+  )
+  .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)
+  .option("--rekor-url <url>", "Sigstore Rekor base URL", DEFAULT_REKOR_URL)
+  .option("--tsa-url <url>", "Sigstore timestamp authority base URL")
+  .option("--oidc-audience <value>", "OIDC audience for CI identity provider", "sigstore")
+  .option("--oidc-issuer <url>", "OIDC issuer for interactive login", SIGSTORE_OIDC_ISSUER)
+  .option("--oidc-client-id <value>", "OIDC client ID for interactive login", SIGSTORE_OIDC_CLIENT_ID)
+  .option("--oidc-scope <value>", "OIDC scope for interactive login", SIGSTORE_OIDC_SCOPE)
+  .option("--oidc-token <value>", "Explicit OIDC ID token to use for Sigstore signing")
+  .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
+  .option("--no-open-browser", "Do not open a browser window for device authorization")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(
     async (options: {
+      type?: string;
       input: string;
-      policyFile: string;
-      key: string;
+      policyFile?: string;
+      key?: string;
+      bundleType?: string;
+      fulcioUrl?: string;
+      rekorUrl?: string;
+      tsaUrl?: string;
+      oidcAudience?: string;
+      oidcIssuer?: string;
+      oidcClientId?: string;
+      oidcScope?: string;
+      oidcToken?: string;
+      interactive?: boolean;
+      openBrowser?: boolean;
       signer: string;
       output?: string;
     }) => {
+      const type = options.type ?? "sigsum";
+      if (type !== "sigsum" && type !== "sigstore") {
+        throw new Error("sign type must be 'sigsum' or 'sigstore'");
+      }
       const document = await loadManifestDocument(options.input);
       const canonicalManifest = canonicalizeManifestBody(document);
-      const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
-      if (document.signatures[signerKey]) {
-        throw new Error("manifest already contains a signature for this signer");
-      }
-      const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
-      const tempFile = path.join(tempDir, "manifest.json");
-      try {
-        await writeFile(tempFile, canonicalManifest);
-        await runSigsumSubmit(options.policyFile, options.key, tempFile);
-        const proofPath = `${tempFile}.proof`;
-        let proofText: string;
+
+      if (type === "sigsum") {
+        if (!options.policyFile) {
+          throw new Error("--policy-file is required for sigsum signing");
+        }
+        if (!options.key) {
+          throw new Error("--key is required for sigsum signing");
+        }
+        const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
+        if (document.signatures.sigsum?.[signerKey]) {
+          throw new Error("manifest already contains a signature for this signer");
+        }
+        if (!document.signatures.sigsum) {
+          document.signatures.sigsum = {};
+        }
+        const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
+        const tempFile = path.join(tempDir, "manifest.json");
         try {
-          const proofRaw = await readFile(proofPath, "utf8");
-          proofText = proofRaw.trim();
-        } catch (err: any) {
-          throw new Error(`failed to read Sigsum proof (${err.message})`);
+          await writeFile(tempFile, canonicalManifest);
+          await runSigsumSubmit(options.policyFile, options.key, tempFile);
+          const proofPath = `${tempFile}.proof`;
+          let proofText: string;
+          try {
+            const proofRaw = await readFile(proofPath, "utf8");
+            proofText = proofRaw.trim();
+          } catch (err: any) {
+            throw new Error(`failed to read Sigsum proof (${err.message})`);
+          }
+          if (proofText.length === 0) {
+            throw new Error("Sigsum proof was empty");
+          }
+          const proof = await SigsumProof.fromAscii(proofText);
+          const messageHash = createHash("sha256").update(canonicalManifest).digest();
+          const checksum = new Hash(createHash("sha256").update(messageHash).digest());
+          const leaf = new Leaf(
+            checksum,
+            new Signature(proof.leaf.Signature.bytes),
+            new KeyHash(proof.leaf.KeyHash.bytes),
+          );
+          const leafBytes = leaf.toBytes();
+          const { hash: leafHash, filePath: leafPath } = await writeCasObject(leafBytes, {
+            upload: true,
+          });
+          process.stdout.write(`Saved raw Sigsum leaf to ${leafPath} (sha256=${leafHash}).\n`);
+          const { hash: checksumHash, filePath: checksumPath } = await writeCasObject(messageHash, {
+            upload: true,
+          });
+          process.stdout.write(`Saved Sigsum checksum payload to ${checksumPath} (sha256=${checksumHash}).\n`);
+          const { hash: manifestHash, filePath: manifestPath } = await writeCasObject(
+            canonicalManifest,
+            { upload: true },
+          );
+          process.stdout.write(`Saved canonical manifest to ${manifestPath} (sha256=${manifestHash}).\n`);
+          document.signatures.sigsum[signerKey] = proofText;
+        } finally {
+          await rm(tempDir, { recursive: true, force: true });
         }
-        if (proofText.length === 0) {
-          throw new Error("Sigsum proof was empty");
-        }
-        const proof = await SigsumProof.fromAscii(proofText);
-        const messageHash = createHash("sha256").update(canonicalManifest).digest();
-        const checksum = new Hash(createHash("sha256").update(messageHash).digest());
-        const leaf = new Leaf(checksum, new Signature(proof.leaf.Signature.bytes), new KeyHash(proof.leaf.KeyHash.bytes));
-        const leafBytes = leaf.toBytes();
-        const { hash: leafHash, filePath: leafPath } = await writeCasObject(leafBytes, { upload: true });
-        process.stdout.write(`Saved raw Sigsum leaf to ${leafPath} (sha256=${leafHash}).\n`);
-        const { hash: checksumHash, filePath: checksumPath } = await writeCasObject(messageHash, {
-          upload: true,
-        });
-        process.stdout.write(`Saved Sigsum checksum payload to ${checksumPath} (sha256=${checksumHash}).\n`);
-        const { hash: manifestHash, filePath: manifestPath } = await writeCasObject(canonicalManifest, {
-          upload: true,
-        });
-        process.stdout.write(`Saved canonical manifest to ${manifestPath} (sha256=${manifestHash}).\n`);
-        document.signatures[signerKey] = proofText;
         const json = JSON.stringify(document, null, 2);
         await writeMaybe(options.output, json);
-      } finally {
-        await rm(tempDir, { recursive: true, force: true });
+        return;
       }
+
+      const bundleType = options.bundleType ?? "message";
+      if (bundleType !== "message" && bundleType !== "dsse") {
+        throw new Error("bundle type must be 'message' or 'dsse'");
+      }
+      if (options.oidcToken && options.interactive) {
+        throw new Error("use either --oidc-token or --interactive, not both");
+      }
+      let identityProvider: CIContextProvider | { getToken: () => Promise<string> };
+      if (options.oidcToken) {
+        const token = options.oidcToken;
+        identityProvider = { getToken: async () => token };
+      } else if (options.interactive) {
+        const issuer = options.oidcIssuer ?? SIGSTORE_OIDC_ISSUER;
+        const clientId = options.oidcClientId ?? SIGSTORE_OIDC_CLIENT_ID;
+        const scope = options.oidcScope ?? SIGSTORE_OIDC_SCOPE;
+        const openBrowserWindow = options.openBrowser ?? true;
+        const token = await fetchInteractiveOidcToken(issuer, clientId, scope, openBrowserWindow);
+        identityProvider = { getToken: async () => token };
+      } else {
+        identityProvider = new CIContextProvider(options.oidcAudience ?? "sigstore");
+      }
+      const signer = new FulcioSigner({
+        fulcioBaseURL: options.fulcioUrl ?? DEFAULT_FULCIO_URL,
+        identityProvider,
+      });
+      const witnesses = [
+        new RekorWitness({ rekorBaseURL: options.rekorUrl ?? DEFAULT_REKOR_URL }),
+      ];
+      if (options.tsaUrl) {
+        witnesses.push(new TSAWitness({ tsaBaseURL: options.tsaUrl }));
+      }
+      const builder =
+        bundleType === "dsse"
+          ? new DSSEBundleBuilder({ signer, witnesses })
+          : new MessageSignatureBundleBuilder({ signer, witnesses });
+      const bundle = await builder.create({
+        data: Buffer.from(canonicalManifest),
+        type: "application/json",
+      });
+      const serializedBundle = bundleToJSON(bundle);
+      if (!document.signatures.sigstore) {
+        document.signatures.sigstore = [];
+      }
+      document.signatures.sigstore.push(serializedBundle);
+      const json = JSON.stringify(document, null, 2);
+      await writeMaybe(options.output, json);
     }
   );
 
@@ -401,7 +674,7 @@ manifest
       let verified = 0;
 
       for (const signer of enrollment.signers) {
-        const proofText = manifestDocument.signatures[signer];
+        const proofText = manifestDocument.signatures.sigsum?.[signer];
         if (!proofText) {
           signerResults.push({ signer, ok: false, message: "signature missing" });
           continue;

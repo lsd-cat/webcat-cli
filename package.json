@@ -9,6 +9,8 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.956.0",
     "@freedomofpress/sigsum": "^0.3.8",
+    "@sigstore/bundle": "^4.0.0",
+    "@sigstore/sign": "^4.1.0",
     "commander": "^14.0.2",
     "tuf-js": "^4.1.0"
   },
