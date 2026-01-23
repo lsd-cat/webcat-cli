@@ -350,6 +350,9 @@ enrollment
       if (!options.identity) {
         throw new Error("--identity is required for sigstore enrollments");
       }
+      if (!options.maxAge) {
+        throw new Error("--max-age is required for sigstore enrollments");
+      }
       const trustedRoot = options.communityTrustedRoot
         ? parseTrustedRootJson(
             await fetchSigstoreCommunityTrustedRoot(),
@@ -364,6 +367,7 @@ enrollment
         trustedRoot,
         issuer: options.issuer,
         identity: options.identity,
+        maxAge: options.maxAge,
       });
     }
 

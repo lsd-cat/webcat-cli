@@ -165,13 +165,15 @@ describe("enrollment helpers", () => {
       trustedRoot: "trusted-root-data",
       issuer: "issuer.example",
       identity: "identity@example.com",
+      maxAge: 1_000_000,
     });
 
     expect(enrollment).toEqual({
       type: "sigstore",
       trusted_root: "trusted-root-data",
       identity: "identity@example.com",
-      rissuer: "issuer.example",
+      issuer: "issuer.example",
+      max_age: 1_000_000,
     });
   });
 
@@ -228,7 +230,8 @@ describe("enrollment helpers", () => {
         type: "sigstore",
         trusted_root: "",
         identity: "id",
-        rissuer: "issuer",
+        issuer: "issuer",
+        max_age: 1_000_000,
       }),
     ).toThrow("enrollment.trusted_root must be a non-empty string");
   });

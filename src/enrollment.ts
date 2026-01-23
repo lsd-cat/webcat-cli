@@ -27,6 +27,7 @@ export interface SigstoreEnrollmentInput {
   trusted_root: Record<string, unknown>;
   identity: string;
   issuer: string;
+  max_age: number;
 }
 
 export type EnrollmentInput = SigsumEnrollmentInput | SigstoreEnrollmentInput;
@@ -46,6 +47,7 @@ export interface SigstoreEnrollmentOptions {
   trustedRoot: Record<string, unknown>;
   identity: string;
   issuer: string;
+  maxAge: number | string;
 }
 
 export type EnrollmentOptions = SigsumEnrollmentOptions | SigstoreEnrollmentOptions;
@@ -58,11 +60,14 @@ export function buildEnrollmentObject(options: EnrollmentOptions): EnrollmentInp
   const type = options.type ?? "sigsum";
   if (type === "sigstore") {
     const sigstoreOptions = options as SigstoreEnrollmentOptions;
+    const parsedMaxAge = parseInteger(sigstoreOptions.maxAge, "max-age");
+    validateMaxAge(parsedMaxAge);
     return {
       type,
       trusted_root: ensureObject(sigstoreOptions.trustedRoot, "trusted_root"),
       identity: ensureNonEmptyString(sigstoreOptions.identity, "identity"),
       issuer: ensureNonEmptyString(sigstoreOptions.issuer, "issuer"),
+      max_age: parsedMaxAge,
     };
   }
 
@@ -109,11 +114,14 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
   }
 
   if (typeValue === "sigstore") {
+    const maxAge = parseInteger(parsed.max_age, "max-age");
+    validateMaxAge(maxAge);
     return {
       type: "sigstore",
       trusted_root: ensureObject(parsed.trusted_root, "enrollment.trusted_root"),
       identity: ensureNonEmptyString(parsed.identity, "enrollment.identity"),
       issuer: ensureNonEmptyString(parsed.issuer, "enrollment.issuer"),
+      max_age: maxAge,
     };
   }
 
