@@ -142,6 +142,7 @@ export function parseManifestDocumentObject(parsed: any): ManifestDocument {
   if (typeof parsed.signatures !== "object" || parsed.signatures === null || Array.isArray(parsed.signatures)) {
     parsed.signatures = {};
   }
+  parsed.signatures = ensureRecordOfStrings(parsed.signatures, "signatures");
   const manifest = parsed.manifest;
   if (typeof manifest.files !== "object" || manifest.files === null || Array.isArray(manifest.files)) {
     throw new Error("manifest.manifest.files must be an object");

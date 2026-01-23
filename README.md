@@ -24,7 +24,9 @@ To build the JavaScript output, run `npm run build`.
 
 ## Enrollment helpers
 
-The `enrollment` namespace manages Sigsum enrollment payloads:
+The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments
+are the default; use `--type sigstore` along with `--trusted-root`, `--issuer`, and `--identity`
+to build Sigstore enrollments.
 
 | Command | Purpose |
 | --- | --- |

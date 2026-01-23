@@ -88,6 +88,7 @@ describe("enrollment helpers", () => {
 
   it("builds normalized enrollment objects", () => {
     const enrollment = buildEnrollmentObject({
+      type: "sigsum",
       policy: "policy-bytes",
       signers: [baseSigner],
       threshold: 1,
@@ -95,6 +96,7 @@ describe("enrollment helpers", () => {
       casUrl: "https://example.com",
     });
 
+    expect(enrollment.type).toBe("sigsum");
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
@@ -103,6 +105,7 @@ describe("enrollment helpers", () => {
   it("rejects duplicate or insufficient signer information", () => {
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [],
         threshold: 1,
@@ -113,6 +116,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner, baseSigner],
         threshold: 1,
@@ -123,6 +127,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner, secondSigner],
         threshold: 3,
@@ -133,6 +138,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner],
         threshold: 0,
@@ -143,6 +149,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner],
         threshold: 1,
@@ -152,12 +159,29 @@ describe("enrollment helpers", () => {
     ).toThrow("CAS URL must use https://");
   });
 
+  it("builds sigstore enrollment objects", () => {
+    const enrollment = buildEnrollmentObject({
+      type: "sigstore",
+      trustedRoot: "trusted-root-data",
+      issuer: "issuer.example",
+      identity: "identity@example.com",
+    });
+
+    expect(enrollment).toEqual({
+      type: "sigstore",
+      trusted_root: "trusted-root-data",
+      identity: "identity@example.com",
+      rissuer: "issuer.example",
+    });
+  });
+
   it("parses enrollment JSON files", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-enroll-"));
     const file = path.join(dir, "enrollment.json");
     await writeFile(
       file,
       JSON.stringify({
+        type: "sigsum",
         policy: "policy",
         signers: [hexToBase64Url(baseSigner)],
         threshold: 1,
@@ -168,6 +192,7 @@ describe("enrollment helpers", () => {
 
     const loaded = await loadEnrollment(file);
     expect(loaded.signers).toEqual([hexToBase64Url(baseSigner)]);
+    expect(loaded.type).toBe("sigsum");
 
     await writeFile(file, "not json");
     await expect(loadEnrollment(file)).rejects.toThrow("failed to parse enrollment JSON");
@@ -178,6 +203,7 @@ describe("enrollment helpers", () => {
   it("parses enrollment objects with validation", () => {
     expect(() =>
       parseEnrollmentObject({
+        type: "sigsum",
         policy: "",
         signers: ["x"],
         threshold: 1,
@@ -188,6 +214,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       parseEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: ["a", "a"],
         threshold: 1,
@@ -195,6 +222,15 @@ describe("enrollment helpers", () => {
         cas_url: "https://example.com",
       }),
     ).toThrow("duplicate signer keys detected in enrollment");
+
+    expect(() =>
+      parseEnrollmentObject({
+        type: "sigstore",
+        trusted_root: "",
+        identity: "id",
+        rissuer: "issuer",
+      }),
+    ).toThrow("enrollment.trusted_root must be a non-empty string");
   });
 });
 

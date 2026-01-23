@@ -45,43 +45,90 @@ const enrollment = program.command("enrollment").description("Enrollment helpers
 enrollment
   .command("create")
   .description("Create an enrollment definition")
-  .requiredOption("-p, --policy-file <path>", "Sigsum policy file to compile")
-  .requiredOption("-s, --signer <key>", "Signer public key (hex or base64)", collectSigner, [] as string[])
-  .requiredOption("-t, --threshold <k>", "Threshold for signature approval")
-  .requiredOption("-m, --max-age <seconds>", "Maximum age in seconds")
-  .requiredOption("-c, --cas-url <url>", "CAS https URL")
+  .option("-p, --policy-file <path>", "Sigsum policy file to compile")
+  .option("-s, --signer <key>", "Signer public key (hex or base64)", collectSigner, [] as string[])
+  .option("-t, --threshold <k>", "Threshold for signature approval")
+  .option("-m, --max-age <seconds>", "Maximum age in seconds")
+  .option("-c, --cas-url <url>", "CAS https URL")
+  .option("--type <type>", "Enrollment type (sigsum or sigstore)", "sigsum")
+  .option("--trusted-root <path>", "Sigstore trusted root file")
+  .option("--issuer <value>", "Sigstore issuer")
+  .option("--identity <value>", "Sigstore identity")
   .option("-o, --output <path>", "Write result to file instead of stdout")
   .action(async (options: {
-    policyFile: string;
+    policyFile?: string;
     signer: string[];
-    threshold: number | string;
-    maxAge: number | string;
-    casUrl: string;
+    threshold?: number | string;
+    maxAge?: number | string;
+    casUrl?: string;
+    type?: string;
+    trustedRoot?: string;
+    issuer?: string;
+    identity?: string;
     output?: string;
   }) => {
-    const policyText = await readFile(options.policyFile, "utf8");
-    const compiled = await compilePolicy(policyText);
-    const policyEncoded = toBase64Url(compiled);
-    const parsedPolicy = await parsePolicyText(policyText);
-    const logsEntries = await Promise.all(
-      Array.from(parsedPolicy.logs.values()).map(async (entity) => {
-        const rawKey = await crypto.subtle.exportKey("raw", entity.publicKey.key);
-        const key = toBase64Url(new Uint8Array(rawKey));
-        const url = typeof entity.url === "string" ? entity.url : "";
-        return [key, url] as const;
-      })
-    );
-    logsEntries.sort(([a], [b]) => a.localeCompare(b));
-    const logs = Object.fromEntries(logsEntries);
+    const enrollmentType = options.type ?? "sigsum";
+    if (enrollmentType !== "sigsum" && enrollmentType !== "sigstore") {
+      throw new Error("enrollment type must be 'sigsum' or 'sigstore'");
+    }
 
-    const enrollmentObject = buildEnrollmentObject({
-      policy: policyEncoded,
-      signers: options.signer,
-      threshold: options.threshold,
-      maxAge: options.maxAge,
-      casUrl: options.casUrl,
-      logs,
-    });
+    let enrollmentObject: EnrollmentInput;
+    if (enrollmentType === "sigsum") {
+      if (!options.policyFile) {
+        throw new Error("--policy-file is required for sigsum enrollments");
+      }
+      if (!options.threshold) {
+        throw new Error("--threshold is required for sigsum enrollments");
+      }
+      if (!options.maxAge) {
+        throw new Error("--max-age is required for sigsum enrollments");
+      }
+      if (!options.casUrl) {
+        throw new Error("--cas-url is required for sigsum enrollments");
+      }
+
+      const policyText = await readFile(options.policyFile, "utf8");
+      const compiled = await compilePolicy(policyText);
+      const policyEncoded = toBase64Url(compiled);
+      const parsedPolicy = await parsePolicyText(policyText);
+      const logsEntries = await Promise.all(
+        Array.from(parsedPolicy.logs.values()).map(async (entity) => {
+          const rawKey = await crypto.subtle.exportKey("raw", entity.publicKey.key);
+          const key = toBase64Url(new Uint8Array(rawKey));
+          const url = typeof entity.url === "string" ? entity.url : "";
+          return [key, url] as const;
+        })
+      );
+      logsEntries.sort(([a], [b]) => a.localeCompare(b));
+      const logs = Object.fromEntries(logsEntries);
+
+      enrollmentObject = buildEnrollmentObject({
+        type: "sigsum",
+        policy: policyEncoded,
+        signers: options.signer,
+        threshold: options.threshold,
+        maxAge: options.maxAge,
+        casUrl: options.casUrl,
+        logs,
+      });
+    } else {
+      if (!options.trustedRoot) {
+        throw new Error("--trusted-root is required for sigstore enrollments");
+      }
+      if (!options.issuer) {
+        throw new Error("--issuer is required for sigstore enrollments");
+      }
+      if (!options.identity) {
+        throw new Error("--identity is required for sigstore enrollments");
+      }
+      const trustedRoot = await readFile(options.trustedRoot, "utf8");
+      enrollmentObject = buildEnrollmentObject({
+        type: "sigstore",
+        trustedRoot,
+        issuer: options.issuer,
+        identity: options.identity,
+      });
+    }
 
     const json = JSON.stringify(enrollmentObject, null, 2);
     const { hash, filePath } = await writeCasObject(json);
@@ -277,7 +324,9 @@ manifest
         enrollment = bundle.enrollment;
         manifestDocument = bundle.manifest;
       }
-
+      if (enrollment.type !== "sigsum") {
+        throw new Error("manifest verification is only supported for sigsum enrollments");
+      }
       const canonicalManifest = canonicalizeManifestBody(manifestDocument);
       const manifestHash = new Uint8Array(
         createHash("sha256").update(canonicalManifest).digest(),

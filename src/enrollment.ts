@@ -2,13 +2,17 @@ import { readFile } from "node:fs/promises";
 import {
   decodeKeyMaterial,
   ensureRecordOfStrings,
+  ensureNonEmptyString,
   parseInteger,
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
 } from "./utils";
 
-export interface EnrollmentInput {
+export type EnrollmentType = "sigsum" | "sigstore";
+
+export interface SigsumEnrollmentInput {
+  type: "sigsum";
   policy: string;
   signers: string[];
   threshold: number;
@@ -17,7 +21,17 @@ export interface EnrollmentInput {
   logs?: Record<string, string>;
 }
 
-export interface EnrollmentOptions {
+export interface SigstoreEnrollmentInput {
+  type: "sigstore";
+  trusted_root: string;
+  identity: string;
+  rissuer: string;
+}
+
+export type EnrollmentInput = SigsumEnrollmentInput | SigstoreEnrollmentInput;
+
+export interface SigsumEnrollmentOptions {
+  type?: "sigsum";
   policy: string;
   signers: string[];
   threshold: number | string;
@@ -26,18 +40,32 @@ export interface EnrollmentOptions {
   logs?: Record<string, string>;
 }
 
+export interface SigstoreEnrollmentOptions {
+  type: "sigstore";
+  trustedRoot: string;
+  identity: string;
+  issuer: string;
+}
+
+export type EnrollmentOptions = SigsumEnrollmentOptions | SigstoreEnrollmentOptions;
+
 export function parseSignerKey(value: string): string {
   return toBase64Url(decodeKeyMaterial(value, "signer keys"));
 }
 
-export function buildEnrollmentObject({
-  policy,
-  signers,
-  threshold,
-  maxAge,
-  casUrl,
-  logs,
-}: EnrollmentOptions): EnrollmentInput {
+export function buildEnrollmentObject(options: EnrollmentOptions): EnrollmentInput {
+  const type = options.type ?? "sigsum";
+  if (type === "sigstore") {
+    const sigstoreOptions = options as SigstoreEnrollmentOptions;
+    return {
+      type,
+      trusted_root: ensureNonEmptyString(sigstoreOptions.trustedRoot, "trusted_root"),
+      identity: ensureNonEmptyString(sigstoreOptions.identity, "identity"),
+      rissuer: ensureNonEmptyString(sigstoreOptions.issuer, "rissuer"),
+    };
+  }
+
+  const { policy, signers, threshold, maxAge, casUrl, logs } = options as SigsumEnrollmentOptions;
   if (signers.length === 0) {
     throw new Error("at least one signer must be provided");
   }
@@ -63,6 +91,7 @@ export function buildEnrollmentObject({
   const normalizedLogs = logs ? ensureRecordOfStrings(logs, "logs") : undefined;
 
   return {
+    type: "sigsum",
     policy,
     signers: unique,
     threshold: parsedThreshold,
@@ -73,6 +102,20 @@ export function buildEnrollmentObject({
 }
 
 export function parseEnrollmentObject(parsed: any): EnrollmentInput {
+  const typeValue = parsed.type ?? "sigsum";
+  if (typeValue !== "sigsum" && typeValue !== "sigstore") {
+    throw new Error("enrollment.type must be 'sigsum' or 'sigstore'");
+  }
+
+  if (typeValue === "sigstore") {
+    return {
+      type: "sigstore",
+      trusted_root: ensureNonEmptyString(parsed.trusted_root, "enrollment.trusted_root"),
+      identity: ensureNonEmptyString(parsed.identity, "enrollment.identity"),
+      rissuer: ensureNonEmptyString(parsed.rissuer, "enrollment.rissuer"),
+    };
+  }
+
   if (typeof parsed.policy !== "string" || parsed.policy.length === 0) {
     throw new Error("enrollment.policy must be a base64url string");
   }
@@ -99,11 +142,18 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
   validateMaxAge(maxAge);
   validateCasUrl(parsed.cas_url);
 
-  if (parsed.logs !== undefined) {
-    ensureRecordOfStrings(parsed.logs, "enrollment.logs");
-  }
+  const normalizedLogs =
+    parsed.logs !== undefined ? ensureRecordOfStrings(parsed.logs, "enrollment.logs") : undefined;
 
-  return parsed as EnrollmentInput;
+  return {
+    type: "sigsum",
+    policy: parsed.policy,
+    signers: parsed.signers,
+    threshold,
+    max_age: maxAge,
+    cas_url: parsed.cas_url,
+    ...(normalizedLogs ? { logs: normalizedLogs } : {}),
+  };
 }
 
 export async function loadEnrollment(path: string): Promise<EnrollmentInput> {
