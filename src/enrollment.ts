@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import {
   decodeKeyMaterial,
+  ensureObject,
   ensureRecordOfStrings,
   ensureNonEmptyString,
   parseInteger,
@@ -23,9 +24,9 @@ export interface SigsumEnrollmentInput {
 
 export interface SigstoreEnrollmentInput {
   type: "sigstore";
-  trusted_root: string;
+  trusted_root: Record<string, unknown>;
   identity: string;
-  rissuer: string;
+  issuer: string;
 }
 
 export type EnrollmentInput = SigsumEnrollmentInput | SigstoreEnrollmentInput;
@@ -42,7 +43,7 @@ export interface SigsumEnrollmentOptions {
 
 export interface SigstoreEnrollmentOptions {
   type: "sigstore";
-  trustedRoot: string;
+  trustedRoot: Record<string, unknown>;
   identity: string;
   issuer: string;
 }
@@ -59,9 +60,9 @@ export function buildEnrollmentObject(options: EnrollmentOptions): EnrollmentInp
     const sigstoreOptions = options as SigstoreEnrollmentOptions;
     return {
       type,
-      trusted_root: ensureNonEmptyString(sigstoreOptions.trustedRoot, "trusted_root"),
+      trusted_root: ensureObject(sigstoreOptions.trustedRoot, "trusted_root"),
       identity: ensureNonEmptyString(sigstoreOptions.identity, "identity"),
-      rissuer: ensureNonEmptyString(sigstoreOptions.issuer, "rissuer"),
+      issuer: ensureNonEmptyString(sigstoreOptions.issuer, "issuer"),
     };
   }
 
@@ -110,9 +111,9 @@ export function parseEnrollmentObject(parsed: any): EnrollmentInput {
   if (typeValue === "sigstore") {
     return {
       type: "sigstore",
-      trusted_root: ensureNonEmptyString(parsed.trusted_root, "enrollment.trusted_root"),
+      trusted_root: ensureObject(parsed.trusted_root, "enrollment.trusted_root"),
       identity: ensureNonEmptyString(parsed.identity, "enrollment.identity"),
-      rissuer: ensureNonEmptyString(parsed.rissuer, "enrollment.rissuer"),
+      issuer: ensureNonEmptyString(parsed.issuer, "enrollment.issuer"),
     };
   }
 

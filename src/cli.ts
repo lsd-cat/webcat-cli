@@ -10,6 +10,7 @@ import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
 import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
 import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
 import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
+import { Updater } from "tuf-js";
 import { canonicalize } from "./canonicalize";
 import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
 import { writeCasObject } from "./cas";
@@ -24,6 +25,11 @@ import { loadBundleDocument } from "./bundle";
 import { deriveSignerKeyFromPrivateKey, fetchTimestampFromPolicy, runSigsumSubmit } from "./sigsum";
 import { decodeKeyMaterial, decodePolicyBytes, hashPolicyBytes, toBase64Url } from "./utils";
 
+const SIGSTORE_TUF_BASE_URL = "https://tuf-repo-cdn.sigstore.dev";
+const SIGSTORE_TUF_ROOT_URL = `${SIGSTORE_TUF_BASE_URL}/1.root.json`;
+const SIGSTORE_TUF_TARGETS_URL = `${SIGSTORE_TUF_BASE_URL}/targets`;
+const SIGSTORE_TRUSTED_ROOT_TARGET = "trusted_root.json";
+
 async function writeMaybe(filePath: string | undefined, contents: string): Promise<void> {
   if (filePath) {
     await writeFile(filePath, contents);
@@ -35,6 +41,50 @@ async function writeMaybe(filePath: string | undefined, contents: string): Promi
 function collectSigner(value: string, previous: string[]): string[] {
   previous.push(value);
   return previous;
+}
+
+async function fetchSigstoreCommunityTrustedRoot(): Promise<string> {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-sigstore-tuf-"));
+  try {
+    const rootResponse = await fetch(SIGSTORE_TUF_ROOT_URL);
+    if (!rootResponse.ok) {
+      throw new Error(
+        `failed to download Sigstore TUF root (${rootResponse.status} ${rootResponse.statusText})`,
+      );
+    }
+    const rootText = await rootResponse.text();
+    await writeFile(path.join(tempDir, "root.json"), rootText);
+
+    const updater = new Updater({
+      metadataDir: tempDir,
+      metadataBaseUrl: SIGSTORE_TUF_BASE_URL,
+      targetDir: tempDir,
+      targetBaseUrl: SIGSTORE_TUF_TARGETS_URL,
+      config: { userAgent: "webcat-cli" },
+    });
+    await updater.refresh();
+
+    const targetInfo = await updater.getTargetInfo(SIGSTORE_TRUSTED_ROOT_TARGET);
+    if (!targetInfo) {
+      throw new Error("Sigstore trusted_root.json target not found in the TUF repository");
+    }
+    const targetPath = await updater.downloadTarget(targetInfo);
+    return await readFile(targetPath, "utf8");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+function parseTrustedRootJson(value: string, source: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("must be a JSON object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err: any) {
+    throw new Error(`failed to parse trusted root from ${source}: ${err.message}`);
+  }
 }
 
 const program = new Command();
@@ -52,6 +102,7 @@ enrollment
   .option("-c, --cas-url <url>", "CAS https URL")
   .option("--type <type>", "Enrollment type (sigsum or sigstore)", "sigsum")
   .option("--trusted-root <path>", "Sigstore trusted root file")
+  .option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF")
   .option("--issuer <value>", "Sigstore issuer")
   .option("--identity <value>", "Sigstore identity")
   .option("-o, --output <path>", "Write result to file instead of stdout")
@@ -63,6 +114,7 @@ enrollment
     casUrl?: string;
     type?: string;
     trustedRoot?: string;
+    communityTrustedRoot?: boolean;
     issuer?: string;
     identity?: string;
     output?: string;
@@ -112,8 +164,11 @@ enrollment
         logs,
       });
     } else {
-      if (!options.trustedRoot) {
-        throw new Error("--trusted-root is required for sigstore enrollments");
+      if (options.communityTrustedRoot && options.trustedRoot) {
+        throw new Error("use either --trusted-root or --community-trusted-root for sigstore enrollments");
+      }
+      if (!options.trustedRoot && !options.communityTrustedRoot) {
+        throw new Error("--trusted-root or --community-trusted-root is required for sigstore enrollments");
       }
       if (!options.issuer) {
         throw new Error("--issuer is required for sigstore enrollments");
@@ -121,7 +176,15 @@ enrollment
       if (!options.identity) {
         throw new Error("--identity is required for sigstore enrollments");
       }
-      const trustedRoot = await readFile(options.trustedRoot, "utf8");
+      const trustedRoot = options.communityTrustedRoot
+        ? parseTrustedRootJson(
+            await fetchSigstoreCommunityTrustedRoot(),
+            "Sigstore TUF community trusted root",
+          )
+        : parseTrustedRootJson(
+            await readFile(options.trustedRoot, "utf8"),
+            options.trustedRoot,
+          );
       enrollmentObject = buildEnrollmentObject({
         type: "sigstore",
         trustedRoot,

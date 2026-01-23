@@ -76,6 +76,13 @@ export function ensureNonEmptyString(value: any, name: string): string {
   return value.trim();
 }
 
+export function ensureObject(value: any, name: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${name} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
 export function ensureAbsolutePath(value: any, name: string): string {
   const normalized = ensureNonEmptyString(value, name);
   if (!normalized.startsWith("/")) {
