@@ -410,6 +410,7 @@ manifest
   .requiredOption("-c, --config <path>", "Manifest config JSON file")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(
     async (options: {
@@ -417,6 +418,7 @@ manifest
       config: string;
       directory: string;
       policyFile?: string;
+      includeDotfiles?: boolean;
       output?: string;
     }) => {
       const type = options.type ?? "sigsum";
@@ -428,7 +430,7 @@ manifest
       }
       const [config, scan, policyText] = await Promise.all([
         loadManifestConfig(options.config),
-        scanDirectory(options.directory),
+        scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles }),
         type === "sigsum" && options.policyFile ? readFile(options.policyFile, "utf8") : Promise.resolve(""),
       ]);
       const indexKey = "/" + config.default_index.replace(/^\/+/, "");
@@ -461,7 +463,6 @@ manifest
       }
       const manifestDocument: ManifestDocument = {
         manifest,
-        signatures: { sigsum: {} },
       };
       const json = JSON.stringify(manifestDocument, null, 2);
       await writeMaybe(options.output, json);

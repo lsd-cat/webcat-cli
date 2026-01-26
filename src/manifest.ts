@@ -29,7 +29,7 @@ export interface ManifestContent extends ManifestConfig {
 
 export interface ManifestDocument {
   manifest: ManifestContent;
-  signatures: ManifestSignatures;
+  signatures?: ManifestSignatures;
 }
 
 export interface ManifestSignatures {
@@ -40,6 +40,10 @@ export interface ManifestSignatures {
 export interface DirectoryScanResult {
   files: Map<string, string>;
   wasm: Set<string>;
+}
+
+export interface DirectoryScanOptions {
+  includeDotfiles?: boolean;
 }
 
 export async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
@@ -102,16 +106,23 @@ export async function loadManifestConfig(configPath: string): Promise<ManifestCo
   };
 }
 
-export async function scanDirectory(rootDir: string): Promise<DirectoryScanResult> {
+export async function scanDirectory(
+  rootDir: string,
+  options: DirectoryScanOptions = {},
+): Promise<DirectoryScanResult> {
   const absoluteRoot = path.resolve(rootDir);
   const result: DirectoryScanResult = {
     files: new Map(),
     wasm: new Set(),
   };
+  const includeDotfiles = options.includeDotfiles ?? false;
 
   async function walk(currentDir: string, relativePrefix: string): Promise<void> {
     const entries = await readdir(currentDir, { withFileTypes: true });
     for (const entry of entries) {
+      if (!includeDotfiles && entry.name.startsWith(".")) {
+        continue;
+      }
       const entryPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         const nextPrefix = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
@@ -160,9 +160,10 @@ describe("enrollment helpers", () => {
   });
 
   it("builds sigstore enrollment objects", () => {
+    const trustedRoot = { fulcio: { root: "data" } };
     const enrollment = buildEnrollmentObject({
       type: "sigstore",
-      trustedRoot: "trusted-root-data",
+      trustedRoot,
       issuer: "issuer.example",
       identity: "identity@example.com",
       maxAge: 1_000_000,
@@ -170,7 +171,7 @@ describe("enrollment helpers", () => {
 
     expect(enrollment).toEqual({
       type: "sigstore",
-      trusted_root: "trusted-root-data",
+      trusted_root: trustedRoot,
       identity: "identity@example.com",
       issuer: "issuer.example",
       max_age: 1_000_000,
@@ -233,7 +234,7 @@ describe("enrollment helpers", () => {
         issuer: "issuer",
         max_age: 1_000_000,
       }),
-    ).toThrow("enrollment.trusted_root must be a non-empty string");
+    ).toThrow("enrollment.trusted_root must be an object");
   });
 });
 
@@ -340,12 +341,23 @@ describe("directory scanning", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-scan-"));
     await writeFile(path.join(dir, "index.html"), "hello");
     await writeFile(path.join(dir, "module.wasm"), "wasm-bytes");
+    await writeFile(path.join(dir, ".env"), "secret");
+    await mkdir(path.join(dir, ".hidden"));
+    await writeFile(path.join(dir, ".hidden", "secret.txt"), "hidden");
 
     const result = await scanDirectory(dir);
     const indexHash = createHash("sha256").update("hello").digest();
     expect(result.files.get("/index.html")).toBe(toBase64Url(indexHash));
     const wasmHash = createHash("sha256").update("wasm-bytes").digest();
     expect(result.wasm.has(toBase64Url(wasmHash))).toBe(true);
+    expect(result.files.has("/.env")).toBe(false);
+    expect(result.files.has("/.hidden/secret.txt")).toBe(false);
+
+    const includeResult = await scanDirectory(dir, { includeDotfiles: true });
+    const dotHash = createHash("sha256").update("secret").digest();
+    expect(includeResult.files.get("/.env")).toBe(toBase64Url(dotHash));
+    const hiddenHash = createHash("sha256").update("hidden").digest();
+    expect(includeResult.files.get("/.hidden/secret.txt")).toBe(toBase64Url(hiddenHash));
 
     await rm(dir, { recursive: true, force: true });
   });
