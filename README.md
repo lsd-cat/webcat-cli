@@ -54,7 +54,7 @@ The `manifest` namespace operates on WEBCAT manifests:
 
 | Command | Purpose |
 | --- | --- |
-| `manifest generate` | Scan a directory of static assets, apply a manifest config, and embed a Sigsum timestamp. |
+| `manifest generate` | Scan a directory of static assets, apply a manifest config, and embed a timestamp for `--type sigsum` (Sigsum log); sigstore manifests omit timestamps. |
 | `manifest sign` | Sign a manifest with Sigsum (default) or Sigstore and attach proofs/bundles. |
 | `manifest canonicalize` | Canonicalize an existing manifest JSON document. |
 | `manifest hash` | Canonicalize and SHA-256 hash a manifest, outputting a base64url digest. |

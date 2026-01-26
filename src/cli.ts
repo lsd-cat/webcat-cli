@@ -406,21 +406,30 @@ const manifest = program.command("manifest").description("Manifest helpers");
 manifest
   .command("generate")
   .description("Generate a manifest from a directory and config")
+  .option("--type <type>", "Manifest type (sigsum or sigstore)", "sigsum")
   .requiredOption("-c, --config <path>", "Manifest config JSON file")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
-  .requiredOption("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(
     async (options: {
+      type?: string;
       config: string;
       directory: string;
-      policyFile: string;
+      policyFile?: string;
       output?: string;
     }) => {
+      const type = options.type ?? "sigsum";
+      if (type !== "sigsum" && type !== "sigstore") {
+        throw new Error("manifest type must be 'sigsum' or 'sigstore'");
+      }
+      if (type === "sigsum" && !options.policyFile) {
+        throw new Error("--policy-file is required for sigsum manifests");
+      }
       const [config, scan, policyText] = await Promise.all([
         loadManifestConfig(options.config),
         scanDirectory(options.directory),
-        readFile(options.policyFile, "utf8"),
+        type === "sigsum" && options.policyFile ? readFile(options.policyFile, "utf8") : Promise.resolve(""),
       ]);
       const indexKey = "/" + config.default_index.replace(/^\/+/, "");
       if (!scan.files.has(indexKey)) {
@@ -429,7 +438,7 @@ manifest
       if (!scan.files.has(config.default_fallback)) {
         throw new Error(`default_fallback ${config.default_fallback} was not found in the scanned files`);
       }
-      const timestamp = await fetchTimestampFromPolicy(policyText);
+      const timestamp = type === "sigsum" ? await fetchTimestampFromPolicy(policyText) : undefined;
       const filesObject = Object.fromEntries(
         Array.from(scan.files.entries()).sort(([a], [b]) => a.localeCompare(b))
       );
@@ -437,18 +446,21 @@ manifest
       const extraCsp = Object.fromEntries(
         Object.entries(config.extra_csp).sort(([a], [b]) => a.localeCompare(b))
       );
+      const manifest: ManifestContent = {
+        app: config.app,
+        version: config.version,
+        default_csp: config.default_csp,
+        files: filesObject,
+        default_index: config.default_index,
+        default_fallback: config.default_fallback,
+        wasm: wasmList,
+        extra_csp: extraCsp,
+      };
+      if (timestamp) {
+        manifest.timestamp = timestamp;
+      }
       const manifestDocument: ManifestDocument = {
-        manifest: {
-          app: config.app,
-          version: config.version,
-          default_csp: config.default_csp,
-          files: filesObject,
-          default_index: config.default_index,
-          default_fallback: config.default_fallback,
-          timestamp,
-          wasm: wasmList,
-          extra_csp: extraCsp,
-        },
+        manifest,
         signatures: { sigsum: {} },
       };
       const json = JSON.stringify(manifestDocument, null, 2);

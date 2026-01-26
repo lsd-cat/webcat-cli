@@ -24,7 +24,7 @@ export interface ManifestConfig {
 
 export interface ManifestContent extends ManifestConfig {
   files: Record<string, string>;
-  timestamp: string;
+  timestamp?: string;
 }
 
 export interface ManifestDocument {
@@ -160,8 +160,10 @@ export function parseManifestDocumentObject(parsed: any): ManifestDocument {
   } else if (typeof manifest.extra_csp !== "object" || manifest.extra_csp === null || Array.isArray(manifest.extra_csp)) {
     throw new Error("manifest.manifest.extra_csp must be an object");
   }
-  if (typeof manifest.timestamp !== "string" || manifest.timestamp.length === 0) {
-    throw new Error("manifest.manifest.timestamp must be a string");
+  if (manifest.timestamp !== undefined) {
+    if (typeof manifest.timestamp !== "string" || manifest.timestamp.length === 0) {
+      throw new Error("manifest.manifest.timestamp must be a string");
+    }
   }
   return parsed as ManifestDocument;
 }
