@@ -34,19 +34,32 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Check out repository
+      # 1. Checkout the caller repository (where the PR will be opened)
+      - name: Check out target repository
         uses: actions/checkout@v4
 
+      # 2. Setup Node
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node_version }}
-          cache: npm
 
-      - name: Install dependencies
+      # 3. Checkout webcat-cli
+      - name: Check out webcat-cli
+        uses: actions/checkout@v4
+        with:
+          repository: freedomofpress/webcat-cli
+          ref: main
+          path: webcat-cli
+
+      # 4. Install webcat-cli dependencies
+      - name: Install webcat-cli dependencies
+        working-directory: webcat-cli
         run: npm ci
 
+      # 5. Generate Sigstore enrollment using the CLI
       - name: Generate sigstore enrollment
         id: enrollment
         env:
@@ -63,7 +76,7 @@ jobs:
 
           mkdir -p "$directory"
 
-          npm run start -- enrollment create \
+          npx tsx webcat-cli/src/cli.ts enrollment create \
             --type sigstore \
             --community-trusted-root \
             --issuer "$ISSUER" \
@@ -85,6 +98,7 @@ jobs:
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "prev_path=$prev_path" >> "$GITHUB_OUTPUT"
 
+      # 6. Prepare PR body
       - name: Prepare pull request details
         if: steps.enrollment.outputs.changed == 'true'
         env:
@@ -107,13 +121,14 @@ jobs:
             echo
             echo "```diff"
             if [ -n "${PREV_PATH:-}" ] && [ -f "$PREV_PATH" ]; then
-              git diff -- "$ENROLLMENT_PATH" "$PREV_PATH"
+              git diff -- "$PREV_PATH" "$ENROLLMENT_PATH"
             else
               git diff -- "$ENROLLMENT_PATH"
             fi
             echo "```"
           } > pr-body.md
 
+      # 7. Open or update a PR
       - name: Open pull request
         if: steps.enrollment.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
@@ -122,6 +137,5 @@ jobs:
           title: "chore: update sigstore enrollment"
           body-path: pr-body.md
           branch: "chore/update-sigstore-enrollment"
-          delete-branch: true
           update-existing: true
-
+          delete-branch: false
