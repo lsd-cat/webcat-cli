@@ -3,14 +3,6 @@ name: Generate and Commit WEBCAT Manifest
 on:
   workflow_call:
     inputs:
-      directory:
-        type: string
-        required: true
-        description: Directory to include in the manifest (e.g. dist/)
-      config:
-        type: string
-        required: true
-        description: Path to webcat.config.json
       manifest_path:
         type: string
         required: false
@@ -31,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Checkout the caller repository
+      # 1. Checkout target repo (only to commit the manifest)
       - name: Check out target repository
         uses: actions/checkout@v4
 
@@ -41,7 +33,27 @@ jobs:
         with:
           node-version: ${{ inputs.node_version }}
 
-      # 3. Checkout webcat-cli
+      # 3. Download inputs
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: webcat-dist
+          path: webcat-dist
+
+      - name: Download WEBCAT config
+        uses: actions/download-artifact@v4
+        with:
+          name: webcat-config
+          path: webcat-config
+
+      # 4. Validate inputs
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          test -d webcat-dist
+          test -f webcat-config/webcat.config.json
+
+      # 5. Checkout webcat-cli
       - name: Check out webcat-cli
         uses: actions/checkout@v4
         with:
@@ -49,12 +61,12 @@ jobs:
           ref: main
           path: webcat-cli
 
-      # 4. Install webcat-cli dependencies
+      # 6. Install webcat-cli dependencies
       - name: Install webcat-cli dependencies
         working-directory: webcat-cli
         run: npm ci
 
-      # 5. Generate unsigned manifest
+      # 7. Generate unsigned manifest
       - name: Generate WEBCAT manifest
         run: |
           set -euo pipefail
@@ -63,11 +75,11 @@ jobs:
 
           npx tsx webcat-cli/src/cli.ts manifest generate \
             --type sigstore \
-            --config "${{ inputs.config }}" \
-            --directory "${{ inputs.directory }}" \
+            --config "webcat-config/webcat.config.json" \
+            --directory "webcat-dist" \
             --output "${{ inputs.manifest_path }}"
 
-      # 6. Obtain GitHub OIDC token
+      # 8. Obtain GitHub OIDC token
       - name: Get GitHub OIDC token
         id: oidc
         run: |
@@ -80,7 +92,7 @@ jobs:
 
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      # 7. Sign manifest with Sigstore
+      # 9. Sign manifest
       - name: Sign manifest with Sigstore
         run: |
           set -euo pipefail
@@ -88,22 +100,23 @@ jobs:
           npx tsx webcat-cli/src/cli.ts manifest sign \
             --type sigstore \
             --input "${{ inputs.manifest_path }}" \
+            --output "${{ inputs.manifest_path }}" \
             --oidc-token "${{ steps.oidc.outputs.token }}"
 
-      # 8. Commit signed manifest back
+      # 10. Commit signed manifest back
       - name: Commit signed manifest
         uses: peter-evans/create-pull-request@v6
         with:
-          commit-message: "chore(webcat): update signed manifest"
-          title: "chore(webcat): update signed manifest"
+          commit-message: "chore: update signed manifest"
+          title: "chore: update signed manifest"
           body: |
-            This PR updates the signed WebCAT manifest.
+            This PR updates the signed WEBCAT manifest.
 
-            - Generated from: `${{ inputs.directory }}`
+            - Generated from artifact: webcat-dist
+            - Config: webcat-config/webcat.config.json
             - Signed using GitHub Actions OIDC + Sigstore
             - Issuer: https://token.actions.githubusercontent.com
           branch: "chore/update-webcat-manifest"
           delete-branch: false
           add-paths: |
             ${{ inputs.manifest_path }}
-
