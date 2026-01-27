@@ -32,10 +32,7 @@ export interface ManifestDocument {
   signatures?: ManifestSignatures;
 }
 
-export interface ManifestSignatures {
-  sigsum?: Record<string, string>;
-  sigstore?: SerializedBundle[];
-}
+export type ManifestSignatures = Record<string, string> | SerializedBundle[];
 
 export interface DirectoryScanResult {
   files: Map<string, string>;
@@ -179,38 +176,44 @@ export function parseManifestDocumentObject(parsed: any): ManifestDocument {
   return parsed as ManifestDocument;
 }
 
-function parseManifestSignatures(value: any): ManifestSignatures {
+function parseManifestSignatures(value: any): ManifestSignatures | undefined {
   if (value === undefined || value === null) {
-    return {};
+    return undefined;
   }
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("signatures must be an object");
+  if (Array.isArray(value)) {
+    value.forEach((entry: any, index: number) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw new Error(`signatures[${index}] must be an object`);
+      }
+    });
+    return value as SerializedBundle[];
+  }
+  if (typeof value !== "object") {
+    throw new Error("signatures must be an object or array");
   }
 
   const hasSigsum = Object.prototype.hasOwnProperty.call(value, "sigsum");
   const hasSigstore = Object.prototype.hasOwnProperty.call(value, "sigstore");
 
   if (!hasSigsum && !hasSigstore) {
-    return { sigsum: ensureRecordOfStrings(value, "signatures") };
+    return ensureRecordOfStrings(value, "signatures");
   }
 
-  const signatures: ManifestSignatures = {};
+  if (hasSigsum && hasSigstore) {
+    throw new Error("signatures cannot include both sigsum and sigstore keys");
+  }
   if (hasSigsum) {
-    signatures.sigsum = ensureRecordOfStrings(value.sigsum ?? {}, "signatures.sigsum");
+    return ensureRecordOfStrings(value.sigsum ?? {}, "signatures.sigsum");
   }
-  if (hasSigstore) {
-    if (!Array.isArray(value.sigstore)) {
-      throw new Error("signatures.sigstore must be an array");
+  if (!Array.isArray(value.sigstore)) {
+    throw new Error("signatures.sigstore must be an array");
+  }
+  value.sigstore.forEach((entry: any, index: number) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`signatures.sigstore[${index}] must be an object`);
     }
-    value.sigstore.forEach((entry: any, index: number) => {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-        throw new Error(`signatures.sigstore[${index}] must be an object`);
-      }
-    });
-    signatures.sigstore = value.sigstore as SerializedBundle[];
-  }
-
-  return signatures;
+  });
+  return value.sigstore as SerializedBundle[];
 }
 
 export async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {

@@ -527,11 +527,14 @@ manifest
           throw new Error("--key is required for sigsum signing");
         }
         const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
-        if (document.signatures.sigsum?.[signerKey]) {
+        if (Array.isArray(document.signatures)) {
+          throw new Error("manifest already contains sigstore signatures");
+        }
+        if (!Array.isArray(document.signatures) && document.signatures?.[signerKey]) {
           throw new Error("manifest already contains a signature for this signer");
         }
-        if (!document.signatures.sigsum) {
-          document.signatures.sigsum = {};
+        if (!document.signatures || Array.isArray(document.signatures)) {
+          document.signatures = {};
         }
         const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
         const tempFile = path.join(tempDir, "manifest.json");
@@ -571,7 +574,7 @@ manifest
             { upload: true },
           );
           process.stdout.write(`Saved canonical manifest to ${manifestPath} (sha256=${manifestHash}).\n`);
-          document.signatures.sigsum[signerKey] = proofText;
+          document.signatures[signerKey] = proofText;
         } finally {
           await rm(tempDir, { recursive: true, force: true });
         }
@@ -620,10 +623,13 @@ manifest
         type: "application/json",
       });
       const serializedBundle = bundleToJSON(bundle);
-      if (!document.signatures.sigstore) {
-        document.signatures.sigstore = [];
+      if (document.signatures && !Array.isArray(document.signatures)) {
+        throw new Error("manifest already contains sigsum signatures");
       }
-      document.signatures.sigstore.push(serializedBundle);
+      if (!document.signatures || !Array.isArray(document.signatures)) {
+        document.signatures = [];
+      }
+      document.signatures.push(serializedBundle);
       const json = JSON.stringify(document, null, 2);
       await writeMaybe(options.output, json);
     }
@@ -691,7 +697,10 @@ manifest
       let verified = 0;
 
       for (const signer of enrollment.signers) {
-        const proofText = manifestDocument.signatures.sigsum?.[signer];
+        const proofText =
+          manifestDocument.signatures && !Array.isArray(manifestDocument.signatures)
+            ? manifestDocument.signatures[signer]
+            : undefined;
         if (!proofText) {
           signerResults.push({ signer, ok: false, message: "signature missing" });
           continue;
