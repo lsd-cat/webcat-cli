@@ -1,0 +1,127 @@
+name: Sync Sigstore Enrollment
+
+on:
+  workflow_call:
+    inputs:
+      issuer:
+        type: string
+        required: true
+        description: Sigstore issuer to enroll.
+      identity:
+        type: string
+        required: true
+        description: Sigstore identity to enroll.
+      max_age:
+        type: string
+        required: false
+        default: "15552000"
+        description: Maximum age (in seconds) for signatures.
+      node_version:
+        type: string
+        required: false
+        default: "20"
+        description: Node.js version to run the CLI.
+      enrollment_path:
+        type: string
+        required: false
+        default: ".well-known/webcat/enrollment.json"
+        description: Path to the enrollment JSON to update.
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate sigstore enrollment
+        id: enrollment
+        env:
+          ISSUER: ${{ inputs.issuer }}
+          IDENTITY: ${{ inputs.identity }}
+          MAX_AGE: ${{ inputs.max_age }}
+          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+        run: |
+          set -euo pipefail
+
+          tmp_file="$(mktemp)"
+          directory="$(dirname "$ENROLLMENT_PATH")"
+          prev_path="${directory}/enrollment-prev.json"
+
+          mkdir -p "$directory"
+
+          npm run start -- enrollment create \
+            --type sigstore \
+            --community-trusted-root \
+            --issuer "$ISSUER" \
+            --identity "$IDENTITY" \
+            --max-age "$MAX_AGE" \
+            --output "$tmp_file"
+
+          if [ -f "$ENROLLMENT_PATH" ]; then
+            if cmp -s "$tmp_file" "$ENROLLMENT_PATH"; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              rm -f "$tmp_file"
+              exit 0
+            fi
+
+            mv "$ENROLLMENT_PATH" "$prev_path"
+          fi
+
+          mv "$tmp_file" "$ENROLLMENT_PATH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "prev_path=$prev_path" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare pull request details
+        if: steps.enrollment.outputs.changed == 'true'
+        env:
+          ISSUER: ${{ inputs.issuer }}
+          IDENTITY: ${{ inputs.identity }}
+          MAX_AGE: ${{ inputs.max_age }}
+          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+          PREV_PATH: ${{ steps.enrollment.outputs.prev_path }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Sigstore enrollment update"
+            echo
+            echo "- Issuer: $ISSUER"
+            echo "- Identity: $IDENTITY"
+            echo "- Max age: $MAX_AGE"
+            echo
+            echo "### Diff"
+            echo
+            echo "```diff"
+            if [ -n "${PREV_PATH:-}" ] && [ -f "$PREV_PATH" ]; then
+              git diff -- "$ENROLLMENT_PATH" "$PREV_PATH"
+            else
+              git diff -- "$ENROLLMENT_PATH"
+            fi
+            echo "```"
+          } > pr-body.md
+
+      - name: Open pull request
+        if: steps.enrollment.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: update sigstore enrollment"
+          title: "chore: update sigstore enrollment"
+          body-path: pr-body.md
+          branch: "chore/update-sigstore-enrollment"
+          delete-branch: true
+          update-existing: true
+
