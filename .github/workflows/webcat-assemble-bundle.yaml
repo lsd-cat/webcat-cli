@@ -82,15 +82,9 @@ jobs:
 
       # 7. Commit bundle
       - name: Commit bundle
-        run: |
-          set -euo pipefail
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ inputs.branch }}
+          add-paths: |
+            "${{ inputs.bundle_path }}"
 
-          git add "${{ inputs.bundle_path }}"
-
-          if git diff --cached --quiet; then
-            echo "No bundle changes to commit"
-            exit 0
-          fi
-
-          git commit -m "chore: update WEBCAT bundle"
-          git push origin "${{ inputs.branch }}"
