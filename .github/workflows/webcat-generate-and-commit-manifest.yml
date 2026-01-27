@@ -1,0 +1,109 @@
+name: Generate and Commit WebCAT Manifest (Sigstore)
+
+on:
+  workflow_call:
+    inputs:
+      directory:
+        type: string
+        required: true
+        description: Directory to include in the manifest (e.g. dist/)
+      config:
+        type: string
+        required: true
+        description: Path to webcat.config.json
+      manifest_path:
+        type: string
+        required: false
+        default: ".well-known/webcat/manifest.json"
+        description: Where to write the signed manifest
+      node_version:
+        type: string
+        required: false
+        default: "20"
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  manifest:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout the caller repository
+      - name: Check out target repository
+        uses: actions/checkout@v4
+
+      # 2. Setup Node.js
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      # 3. Checkout webcat-cli
+      - name: Check out webcat-cli
+        uses: actions/checkout@v4
+        with:
+          repository: freedomofpress/webcat-cli
+          ref: main
+          path: webcat-cli
+
+      # 4. Install webcat-cli dependencies
+      - name: Install webcat-cli dependencies
+        working-directory: webcat-cli
+        run: npm ci
+
+      # 5. Generate unsigned manifest
+      - name: Generate WebCAT manifest
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$(dirname "${{ inputs.manifest_path }}")"
+
+          npx tsx webcat-cli/src/cli.ts manifest generate \
+            --type sigstore \
+            --config "${{ inputs.config }}" \
+            --directory "${{ inputs.directory }}" \
+            --output "${{ inputs.manifest_path }}"
+
+      # 6. Obtain GitHub OIDC token
+      - name: Get GitHub OIDC token
+        id: oidc
+        run: |
+          set -euo pipefail
+
+          TOKEN="$(curl -s \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sigstore" \
+            | jq -r .value)"
+
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # 7. Sign manifest with Sigstore
+      - name: Sign manifest with Sigstore
+        run: |
+          set -euo pipefail
+
+          npx tsx webcat-cli/src/cli.ts manifest sign \
+            --type sigstore \
+            --input "${{ inputs.manifest_path }}" \
+            --oidc-token "${{ steps.oidc.outputs.token }}"
+
+      # 8. Commit signed manifest back
+      - name: Commit signed manifest
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(webcat): update signed manifest"
+          title: "chore(webcat): update signed manifest"
+          body: |
+            This PR updates the signed WebCAT manifest.
+
+            - Generated from: `${{ inputs.directory }}`
+            - Signed using GitHub Actions OIDC + Sigstore
+            - Issuer: https://token.actions.githubusercontent.com
+          branch: "chore/update-webcat-manifest"
+          delete-branch: false
+          add-paths: |
+            ${{ inputs.manifest_path }}
+
