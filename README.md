@@ -7,6 +7,7 @@ Utilities for creating, validating, and packaging WEBCAT enrollments and manifes
 - Node.js 20 or newer.
 - `sigsum-submit` must be available on your `$PATH` for `manifest sign` operations.
 - A Sigsum trust policy and keypair for signing manifests.
+- An OIDC identity token in the environment (CI-supported) or interactive login for `manifest sign --type sigstore`.
 
 ## Installation
 
@@ -24,7 +25,9 @@ To build the JavaScript output, run `npm run build`.
 
 ## Enrollment helpers
 
-The `enrollment` namespace manages Sigsum enrollment payloads:
+The `enrollment` namespace manages Sigsum or Sigstore enrollment payloads. Sigsum enrollments
+are the default; use `--type sigstore` along with `--issuer`, `--identity`, and either
+`--trusted-root` or `--community-trusted-root` to build Sigstore enrollments.
 
 | Command | Purpose |
 | --- | --- |
@@ -51,11 +54,13 @@ The `manifest` namespace operates on WEBCAT manifests:
 
 | Command | Purpose |
 | --- | --- |
-| `manifest generate` | Scan a directory of static assets, apply a manifest config, and embed a Sigsum timestamp. |
-| `manifest sign` | Canonicalize a manifest body, call `sigsum-submit`, and attach the returned proof under a signer key. |
+| `manifest generate` | Scan a directory of static assets, apply a manifest config, and embed a timestamp for `--type sigsum` (Sigsum log); sigstore manifests omit timestamps. |
+| `manifest sign` | Sign a manifest with Sigsum (default) or Sigstore and attach proofs/bundles. |
 | `manifest canonicalize` | Canonicalize an existing manifest JSON document. |
 | `manifest hash` | Canonicalize and SHA-256 hash a manifest, outputting a base64url digest. |
 | `manifest verify` | Verify signatures in a manifest (or bundle) against an enrollment and print the policy hash. |
+
+`manifest generate` skips dotfiles and dotfolders by default; pass `--include-dotfiles` to include them.
 
 Example – hash the provided manifest:
 
@@ -68,6 +73,51 @@ Example – verify a bundle:
 
 ```sh
 npx tsx src/cli.ts manifest verify examples/bundle.json
+```
+
+### Sigstore signing
+
+Sigstore signing defaults to the community Fulcio/Rekor services. You can override the
+endpoints with `--fulcio-url`, `--rekor-url`, and `--tsa-url` when signing.
+
+To sign with Sigstore using an ambient OIDC token (for example, in CI):
+
+```sh
+npx tsx src/cli.ts manifest sign \
+  --type sigstore \
+  --input manifest.json
+```
+
+If you already have an OIDC ID token, you can pass it explicitly:
+
+```sh
+npx tsx src/cli.ts manifest sign \
+  --type sigstore \
+  --input manifest.json \
+  --oidc-token "$OIDC_ID_TOKEN"
+```
+
+To perform an interactive device authorization flow (opens a browser and prompts for a code):
+
+```sh
+npx tsx src/cli.ts manifest sign \
+  --type sigstore \
+  --input manifest.json \
+  --interactive
+```
+
+To use custom Sigstore infrastructure:
+
+```sh
+npx tsx src/cli.ts manifest sign \
+  --type sigstore \
+  --input manifest.json \
+  --fulcio-url https://fulcio.example.com \
+  --rekor-url https://rekor.example.com \
+  --tsa-url https://tsa.example.com \
+  --oidc-issuer https://oauth2.example.com/auth \
+  --oidc-client-id example-client \
+  --interactive
 ```
 
 ## Bundle helpers

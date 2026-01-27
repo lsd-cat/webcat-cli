@@ -1,31 +1,30 @@
 import { describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { testExports } from "../src/cli";
-
-const {
-  toBase64Url,
-  decodeKeyMaterial,
-  parseSignerKey,
-  parseInteger,
-  validateMaxAge,
-  validateCasUrl,
+import { Hash, KeyHash, Leaf, Signature } from "@freedomofpress/sigsum/dist/types";
+import {
   buildEnrollmentObject,
-  parseEnrollmentObject,
-  loadEnrollment,
-  ensureNonEmptyString,
+  decodeKeyMaterial,
   ensureAbsolutePath,
+  ensureNonEmptyString,
   ensureRecordOfStrings,
-  loadManifestConfig,
-  scanDirectory,
-  parseManifestDocumentObject,
-  loadManifestDocument,
-  decodePolicyBytes,
-  loadBundleDocument,
   hexToBase64Url,
-} = testExports;
+  loadBundleDocument,
+  loadEnrollment,
+  loadManifestConfig,
+  loadManifestDocument,
+  parseEnrollmentObject,
+  parseInteger,
+  parseManifestDocumentObject,
+  parseSignerKey,
+  scanDirectory,
+  toBase64Url,
+  validateCasUrl,
+  validateMaxAge,
+} from "../src/test-exports";
+import { writeCasObject } from "../src/cas";
 
 describe("key parsing", () => {
   it("decodes hex and base64url strings", () => {
@@ -89,6 +88,7 @@ describe("enrollment helpers", () => {
 
   it("builds normalized enrollment objects", () => {
     const enrollment = buildEnrollmentObject({
+      type: "sigsum",
       policy: "policy-bytes",
       signers: [baseSigner],
       threshold: 1,
@@ -96,6 +96,7 @@ describe("enrollment helpers", () => {
       casUrl: "https://example.com",
     });
 
+    expect(enrollment.type).toBe("sigsum");
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
@@ -104,6 +105,7 @@ describe("enrollment helpers", () => {
   it("rejects duplicate or insufficient signer information", () => {
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [],
         threshold: 1,
@@ -114,6 +116,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner, baseSigner],
         threshold: 1,
@@ -124,6 +127,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner, secondSigner],
         threshold: 3,
@@ -134,6 +138,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner],
         threshold: 0,
@@ -144,6 +149,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       buildEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: [baseSigner],
         threshold: 1,
@@ -153,12 +159,32 @@ describe("enrollment helpers", () => {
     ).toThrow("CAS URL must use https://");
   });
 
+  it("builds sigstore enrollment objects", () => {
+    const trustedRoot = { fulcio: { root: "data" } };
+    const enrollment = buildEnrollmentObject({
+      type: "sigstore",
+      trustedRoot,
+      issuer: "issuer.example",
+      identity: "identity@example.com",
+      maxAge: 1_000_000,
+    });
+
+    expect(enrollment).toEqual({
+      type: "sigstore",
+      trusted_root: trustedRoot,
+      identity: "identity@example.com",
+      issuer: "issuer.example",
+      max_age: 1_000_000,
+    });
+  });
+
   it("parses enrollment JSON files", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-enroll-"));
     const file = path.join(dir, "enrollment.json");
     await writeFile(
       file,
       JSON.stringify({
+        type: "sigsum",
         policy: "policy",
         signers: [hexToBase64Url(baseSigner)],
         threshold: 1,
@@ -169,6 +195,7 @@ describe("enrollment helpers", () => {
 
     const loaded = await loadEnrollment(file);
     expect(loaded.signers).toEqual([hexToBase64Url(baseSigner)]);
+    expect(loaded.type).toBe("sigsum");
 
     await writeFile(file, "not json");
     await expect(loadEnrollment(file)).rejects.toThrow("failed to parse enrollment JSON");
@@ -179,6 +206,7 @@ describe("enrollment helpers", () => {
   it("parses enrollment objects with validation", () => {
     expect(() =>
       parseEnrollmentObject({
+        type: "sigsum",
         policy: "",
         signers: ["x"],
         threshold: 1,
@@ -189,6 +217,7 @@ describe("enrollment helpers", () => {
 
     expect(() =>
       parseEnrollmentObject({
+        type: "sigsum",
         policy: "policy",
         signers: ["a", "a"],
         threshold: 1,
@@ -196,6 +225,16 @@ describe("enrollment helpers", () => {
         cas_url: "https://example.com",
       }),
     ).toThrow("duplicate signer keys detected in enrollment");
+
+    expect(() =>
+      parseEnrollmentObject({
+        type: "sigstore",
+        trusted_root: "",
+        identity: "id",
+        issuer: "issuer",
+        max_age: 1_000_000,
+      }),
+    ).toThrow("enrollment.trusted_root must be an object");
   });
 });
 
@@ -216,6 +255,39 @@ describe("string and path validation", () => {
       "record entries must be non-empty strings",
     );
     expect(ensureRecordOfStrings({ a: "x" }, "record")).toEqual({ a: "x" });
+  });
+});
+
+describe("CAS resolution", () => {
+  it("resolves from leaf checksum to manifest via CAS", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-cas-"));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const canonicalManifest = JSON.stringify({ manifest: { app: "demo" }, signatures: {} });
+      const messageHash = createHash("sha256").update(canonicalManifest).digest();
+      const checksum = new Hash(createHash("sha256").update(messageHash).digest());
+      const signature = new Signature(new Uint8Array(64));
+      const keyHash = new KeyHash(new Uint8Array(32));
+      const leafBytes = new Leaf(checksum, signature, keyHash).toBytes();
+
+      const { hash: leafHash } = await writeCasObject(leafBytes);
+      await writeCasObject(messageHash);
+      await writeCasObject(canonicalManifest);
+
+      const storedLeaf = await readFile(path.join(dir, "cas", leafHash));
+      const storedChecksum = storedLeaf.subarray(1, 33);
+      const checksumHex = Buffer.from(storedChecksum).toString("hex");
+
+      const storedMessageHash = await readFile(path.join(dir, "cas", checksumHex));
+      const messageHashHex = Buffer.from(storedMessageHash).toString("hex");
+
+      const storedManifest = await readFile(path.join(dir, "cas", messageHashHex), "utf8");
+      expect(storedManifest).toBe(canonicalManifest);
+    } finally {
+      process.chdir(cwd);
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -269,12 +341,23 @@ describe("directory scanning", () => {
     const dir = await mkdtemp(path.join(tmpdir(), "webcat-scan-"));
     await writeFile(path.join(dir, "index.html"), "hello");
     await writeFile(path.join(dir, "module.wasm"), "wasm-bytes");
+    await writeFile(path.join(dir, ".env"), "secret");
+    await mkdir(path.join(dir, ".hidden"));
+    await writeFile(path.join(dir, ".hidden", "secret.txt"), "hidden");
 
     const result = await scanDirectory(dir);
     const indexHash = createHash("sha256").update("hello").digest();
     expect(result.files.get("/index.html")).toBe(toBase64Url(indexHash));
     const wasmHash = createHash("sha256").update("wasm-bytes").digest();
     expect(result.wasm.has(toBase64Url(wasmHash))).toBe(true);
+    expect(result.files.has("/.env")).toBe(false);
+    expect(result.files.has("/.hidden/secret.txt")).toBe(false);
+
+    const includeResult = await scanDirectory(dir, { includeDotfiles: true });
+    const dotHash = createHash("sha256").update("secret").digest();
+    expect(includeResult.files.get("/.env")).toBe(toBase64Url(dotHash));
+    const hiddenHash = createHash("sha256").update("hidden").digest();
+    expect(includeResult.files.get("/.hidden/secret.txt")).toBe(toBase64Url(hiddenHash));
 
     await rm(dir, { recursive: true, force: true });
   });

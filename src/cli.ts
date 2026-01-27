@@ -1,223 +1,68 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { spawn } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
 import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
-import {
-  hashKey,
-  verifyCosignedTreeHead,
-  verifySignedTreeHead,
-} from "@freedomofpress/sigsum/dist/crypto";
-import { hexToBase64, hexToUint8Array } from "@freedomofpress/sigsum/dist/encoding";
-import { Base64KeyHash, Hash, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
+import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
 import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
+import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
+import { bundleToJSON } from "@sigstore/bundle";
+import {
+  CIContextProvider,
+  DEFAULT_FULCIO_URL,
+  DEFAULT_REKOR_URL,
+  DSSEBundleBuilder,
+  FulcioSigner,
+  MessageSignatureBundleBuilder,
+  RekorWitness,
+  TSAWitness,
+} from "@sigstore/sign";
+import { Updater } from "tuf-js";
 import { canonicalize } from "./canonicalize";
+import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
+import { writeCasObject } from "./cas";
+import {
+  ManifestDocument,
+  canonicalizeManifestBody,
+  loadManifestConfig,
+  loadManifestDocument,
+  scanDirectory,
+} from "./manifest";
+import { loadBundleDocument } from "./bundle";
+import { deriveSignerKeyFromPrivateKey, fetchTimestampFromPolicy, runSigsumSubmit } from "./sigsum";
+import { decodeKeyMaterial, decodePolicyBytes, hashPolicyBytes, toBase64Url } from "./utils";
 
-export interface EnrollmentInput {
-  policy: string;
-  signers: string[];
-  threshold: number;
-  max_age: number;
-  cas_url: string;
-}
+const SIGSTORE_TUF_BASE_URL = "https://tuf-repo-cdn.sigstore.dev";
+const SIGSTORE_TUF_ROOT_URL = `${SIGSTORE_TUF_BASE_URL}/1.root.json`;
+const SIGSTORE_TUF_TARGETS_URL = `${SIGSTORE_TUF_BASE_URL}/targets`;
+const SIGSTORE_TRUSTED_ROOT_TARGET = "trusted_root.json";
+const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
+const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
+const SIGSTORE_OIDC_SCOPE = "openid email";
 
-export interface EnrollmentOptions {
-  policy: string;
-  signers: string[];
-  threshold: number | string;
-  maxAge: number | string;
-  casUrl: string;
-}
+type DeviceAuthResponse = {
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete?: string;
+  expires_in: number;
+  interval?: number;
+};
 
-const WEEK_SECONDS = 7 * 24 * 60 * 60;
-const YEAR_SECONDS = 365 * 24 * 60 * 60;
-const HEX_RE = /^[0-9a-fA-F]+$/;
-const WASM_EXTENSION = ".wasm";
+type OidcConfig = {
+  device_authorization_endpoint?: string;
+  token_endpoint?: string;
+};
 
-interface ManifestConfig {
-  app: string;
-  version: string;
-  default_csp: string;
-  default_index: string;
-  default_fallback: string;
-  wasm: string[];
-  extra_csp: Record<string, string>;
-}
-
-interface ManifestContent extends ManifestConfig {
-  files: Record<string, string>;
-  timestamp: string;
-}
-
-interface ManifestDocument {
-  manifest: ManifestContent;
-  signatures: Record<string, string>;
-}
-
-interface DirectoryScanResult {
-  files: Map<string, string>;
-  wasm: Set<string>;
-}
-
-function toBase64Url(input: Uint8Array | Buffer): string {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function decodeKeyMaterial(value: string, name: string): Buffer {
-  const trimmed = value.trim();
-  let bytes: Buffer;
-
-  if (HEX_RE.test(trimmed)) {
-    if (trimmed.length % 2 !== 0) {
-      throw new Error(`${name} must contain an even number of hex characters`);
-    }
-    bytes = Buffer.from(trimmed, "hex");
-  } else {
-    const normalized = trimmed.replace(/-/g, "+").replace(/_/g, "/");
-    try {
-      bytes = Buffer.from(normalized, "base64");
-    } catch (err: any) {
-      throw new Error(`invalid base64 for ${name}: ${err.message}`);
-    }
-  }
-
-  if (bytes.length !== 32) {
-    throw new Error(`${name} must be 32 bytes (ed25519 public keys)`);
-  }
-
-  return bytes;
-}
-
-function parseSignerKey(value: string): string {
-  return toBase64Url(decodeKeyMaterial(value, "signer keys"));
-}
-
-function parseInteger(value: number | string, name: string): number {
-  const n = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return n;
-}
-
-function validateMaxAge(maxAge: number): void {
-  if (maxAge <= WEEK_SECONDS) {
-    throw new Error("max-age must be larger than one week");
-  }
-  if (maxAge >= YEAR_SECONDS) {
-    throw new Error("max-age must be smaller than one year");
-  }
-}
-
-function validateCasUrl(urlString: string): void {
-  let parsed: URL;
-  try {
-    parsed = new URL(urlString);
-  } catch (err: any) {
-    throw new Error(`invalid CAS URL: ${err.message}`);
-  }
-  if (parsed.protocol !== "https:") {
-    throw new Error("CAS URL must use https://");
-  }
-  if (!parsed.hostname) {
-    throw new Error("CAS URL must include a hostname");
-  }
-}
-
-function collectSigner(value: string, previous: string[]): string[] {
-  previous.push(value);
-  return previous;
-}
-
-function buildEnrollmentObject({
-  policy,
-  signers,
-  threshold,
-  maxAge,
-  casUrl,
-}: EnrollmentOptions): EnrollmentInput {
-  if (signers.length === 0) {
-    throw new Error("at least one signer must be provided");
-  }
-
-  const normalized = signers.map(parseSignerKey);
-  const unique = Array.from(new Set(normalized));
-  if (unique.length !== normalized.length) {
-    throw new Error("duplicate signer keys detected");
-  }
-
-  const parsedThreshold = parseInteger(threshold, "threshold");
-  if (parsedThreshold === 0) {
-    throw new Error("threshold must be at least 1");
-  }
-  if (parsedThreshold > unique.length) {
-    throw new Error("threshold cannot exceed number of signers");
-  }
-
-  const parsedMaxAge = parseInteger(maxAge, "max-age");
-  validateMaxAge(parsedMaxAge);
-  validateCasUrl(casUrl);
-
-  return {
-    policy,
-    signers: unique,
-    threshold: parsedThreshold,
-    max_age: parsedMaxAge,
-    cas_url: casUrl,
-  };
-}
-
-function parseEnrollmentObject(parsed: any): EnrollmentInput {
-  if (typeof parsed.policy !== "string" || parsed.policy.length === 0) {
-    throw new Error("enrollment.policy must be a base64url string");
-  }
-  if (!Array.isArray(parsed.signers)) {
-    throw new Error("enrollment.signers must be an array");
-  }
-  if (parsed.signers.some((s: any) => typeof s !== "string" || s.length === 0)) {
-    throw new Error("each signer must be a non-empty string");
-  }
-  const unique = new Set(parsed.signers);
-  if (unique.size !== parsed.signers.length) {
-    throw new Error("duplicate signer keys detected in enrollment");
-  }
-
-  const threshold = parseInteger(parsed.threshold, "threshold");
-  if (threshold === 0) {
-    throw new Error("threshold must be at least 1");
-  }
-  if (threshold > parsed.signers.length) {
-    throw new Error("threshold cannot exceed number of signers");
-  }
-
-  const maxAge = parseInteger(parsed.max_age, "max-age");
-  validateMaxAge(maxAge);
-  validateCasUrl(parsed.cas_url);
-
-  return parsed as EnrollmentInput;
-}
-
-async function loadEnrollment(path: string): Promise<EnrollmentInput> {
-  const raw = await readFile(path, "utf8");
-  let parsed: any;
-
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse enrollment JSON: ${err.message}`);
-  }
-
-  return parseEnrollmentObject(parsed);
-}
+type PkcePair = {
+  verifier: string;
+  challenge: string;
+};
 
 async function writeMaybe(filePath: string | undefined, contents: string): Promise<void> {
   if (filePath) {
@@ -227,394 +72,193 @@ async function writeMaybe(filePath: string | undefined, contents: string): Promi
   }
 }
 
-function ensureNonEmptyString(value: any, name: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${name} must be a non-empty string`);
-  }
-  return value.trim();
+function collectSigner(value: string, previous: string[]): string[] {
+  previous.push(value);
+  return previous;
 }
 
-function ensureAbsolutePath(value: any, name: string): string {
-  const normalized = ensureNonEmptyString(value, name);
-  if (!normalized.startsWith("/")) {
-    throw new Error(`${name} must start with '/'`);
-  }
-  return normalized;
-}
-
-function ensureRecordOfStrings(value: any, name: string): Record<string, string> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error(`${name} must be an object`);
-  }
-  const record: Record<string, string> = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (typeof raw !== "string" || raw.trim().length === 0) {
-      throw new Error(`${name} entries must be non-empty strings`);
-    }
-    record[key] = raw.trim();
-  }
-  return record;
-}
-
-function runSigsumKeyToHex(pubKeyPath: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "sigsum-key",
-      ["to-hex", "-k", pubKeyPath],
-      { stdio: ["ignore", "pipe", "pipe"] } // capture stdout
-    );
-
-    let output = "";
-    let errout = "";
-
-    child.stdout.on("data", (d) => output += d.toString());
-    child.stderr.on("data", (d) => errout += d.toString());
-
-    child.on("error", (err) => {
-      reject(new Error(`failed to launch sigsum-key: ${err.message}`));
-    });
-
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else if (signal) {
-        reject(new Error(`sigsum-key terminated via signal ${signal}`));
-      } else {
-        reject(new Error(`sigsum-key exited with code ${code}: ${errout.trim()}`));
-      }
-    });
-  });
-}
-
-function hexToBase64Url(hex: string): string {
-  const buf = Buffer.from(hex, "hex");
-  return buf.toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-async function deriveSignerKeyFromPrivateKey(privKeyPath: string): Promise<string> {
-  const pubPath = `${privKeyPath}.pub`;
-
-  const hex = await runSigsumKeyToHex(pubPath);
-
-  if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-    throw new Error(`sigsum-key returned invalid hex for ${pubPath}: ${hex}`);
-  }
-
-  return hexToBase64Url(hex);
-}
-
-
-async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
-  const raw = await readFile(configPath, "utf8");
-  let parsed: any;
+async function fetchSigstoreCommunityTrustedRoot(): Promise<string> {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-sigstore-tuf-"));
   try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse manifest config JSON: ${err.message}`);
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("manifest config must be a JSON object");
-  }
+    const rootResponse = await fetch(SIGSTORE_TUF_ROOT_URL);
+    if (!rootResponse.ok) {
+      throw new Error(
+        `failed to download Sigstore TUF root (${rootResponse.status} ${rootResponse.statusText})`,
+      );
+    }
+    const rootText = await rootResponse.text();
+    await writeFile(path.join(tempDir, "root.json"), rootText);
 
-  const app = ensureNonEmptyString(parsed.app, "config.app");
-  try {
-    new URL(app);
-  } catch (err: any) {
-    throw new Error(`config.app must be a valid URL: ${err.message}`);
-  }
-
-  const version = ensureNonEmptyString(parsed.version, "config.version");
-  const defaultCsp = ensureNonEmptyString(parsed.default_csp, "config.default_csp");
-  // Remove leading / to default_index. It is automatically appended to dirs whcih
-  // have a ending /
-  let defaultIndex = ensureNonEmptyString(parsed.default_index, "config.default_index");
-  defaultIndex = defaultIndex.replace(/^\/+/, ""); // optional: normalize if user wrote "/index.html"
-  const defaultFallback = ensureAbsolutePath(parsed.default_fallback, "config.default_fallback");
-
-  let wasmList: string[] = [];
-  if (parsed.wasm === undefined) {
-    wasmList = [];
-  } else if (!Array.isArray(parsed.wasm)) {
-    throw new Error("config.wasm must be an array of strings");
-  } else {
-    wasmList = parsed.wasm.map((value: any, index: number) => {
-      if (typeof value !== "string" || value.trim().length === 0) {
-        throw new Error(`config.wasm[${index}] must be a non-empty string`);
-      }
-      return value.trim();
+    const updater = new Updater({
+      metadataDir: tempDir,
+      metadataBaseUrl: SIGSTORE_TUF_BASE_URL,
+      targetDir: tempDir,
+      targetBaseUrl: SIGSTORE_TUF_TARGETS_URL,
+      config: { userAgent: "webcat-cli" },
     });
-  }
+    await updater.refresh();
 
-  const extraCspRaw = parsed.extra_csp ?? {};
-  const extraCspRecord = ensureRecordOfStrings(extraCspRaw, "config.extra_csp");
-  for (const key of Object.keys(extraCspRecord)) {
-    if (!key.startsWith("/")) {
-      throw new Error(`config.extra_csp keys must start with '/': ${key}`);
+    const targetInfo = await updater.getTargetInfo(SIGSTORE_TRUSTED_ROOT_TARGET);
+    if (!targetInfo) {
+      throw new Error("Sigstore trusted_root.json target not found in the TUF repository");
     }
-  }
-
-  return {
-    app,
-    version,
-    default_csp: defaultCsp,
-    default_index: defaultIndex,
-    default_fallback: defaultFallback,
-    wasm: wasmList,
-    extra_csp: extraCspRecord,
-  };
-}
-
-async function scanDirectory(rootDir: string): Promise<DirectoryScanResult> {
-  const absoluteRoot = path.resolve(rootDir);
-  const result: DirectoryScanResult = {
-    files: new Map(),
-    wasm: new Set(),
-  };
-
-  async function walk(currentDir: string, relativePrefix: string): Promise<void> {
-    const entries = await readdir(currentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      const entryPath = path.join(currentDir, entry.name);
-      if (entry.isDirectory()) {
-        const nextPrefix = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-        await walk(entryPath, nextPrefix);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-      const manifestPath = `/${relativePath}`;
-      const contents = await readFile(entryPath);
-      const digest = createHash("sha256").update(contents).digest();
-      const encoded = toBase64Url(digest);
-      if (path.extname(entry.name).toLowerCase() === WASM_EXTENSION) {
-        result.wasm.add(encoded);
-      } else {
-        result.files.set(manifestPath, encoded);
-      }
-    }
-  }
-
-  await walk(absoluteRoot, "");
-  return result;
-}
-
-function parseManifestDocumentObject(parsed: any): ManifestDocument {
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("manifest file must contain a JSON object");
-  }
-  if (typeof parsed.manifest !== "object" || parsed.manifest === null || Array.isArray(parsed.manifest)) {
-    throw new Error("manifest file must include a 'manifest' object");
-  }
-  if (typeof parsed.signatures !== "object" || parsed.signatures === null || Array.isArray(parsed.signatures)) {
-    parsed.signatures = {};
-  }
-  const manifest = parsed.manifest;
-  if (typeof manifest.files !== "object" || manifest.files === null || Array.isArray(manifest.files)) {
-    throw new Error("manifest.manifest.files must be an object");
-  }
-  if (manifest.wasm === undefined) {
-    manifest.wasm = [];
-  } else if (!Array.isArray(manifest.wasm)) {
-    throw new Error("manifest.manifest.wasm must be an array");
-  }
-  if (manifest.extra_csp === undefined) {
-    manifest.extra_csp = {};
-  } else if (typeof manifest.extra_csp !== "object" || manifest.extra_csp === null || Array.isArray(manifest.extra_csp)) {
-    throw new Error("manifest.manifest.extra_csp must be an object");
-  }
-  if (typeof manifest.timestamp !== "string" || manifest.timestamp.length === 0) {
-    throw new Error("manifest.manifest.timestamp must be a string");
-  }
-  return parsed as ManifestDocument;
-}
-
-async function loadManifestDocument(manifestPath: string): Promise<ManifestDocument> {
-  const raw = await readFile(manifestPath, "utf8");
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse manifest JSON: ${err.message}`);
-  }
-  return parseManifestDocumentObject(parsed);
-}
-
-function canonicalizeManifestBody(document: ManifestDocument): string {
-  return canonicalize(document.manifest);
-}
-
-function decodePolicyBytes(encoded: string): Uint8Array {
-  try {
-    const buffer = Buffer.from(encoded, "base64url");
-    if (buffer.length === 0) {
-      throw new Error("policy payload was empty");
-    }
-    return new Uint8Array(buffer);
-  } catch (err: any) {
-    throw new Error(`failed to decode compiled policy: ${err.message}`);
+    const targetPath = await updater.downloadTarget(targetInfo);
+    return await readFile(targetPath, "utf8");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
   }
 }
 
-async function loadBundleDocument(bundlePath: string): Promise<{
-  enrollment: EnrollmentInput;
-  manifest: ManifestDocument;
-}> {
-  const raw = await readFile(bundlePath, "utf8");
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (err: any) {
-    throw new Error(`failed to parse bundle JSON: ${err.message}`);
-  }
-  if (typeof parsed !== "object" || parsed === null) {
-    throw new Error("bundle file must contain a JSON object");
-  }
-  if (!parsed.enrollment) {
-    throw new Error("bundle is missing 'enrollment'");
-  }
-  if (!parsed.manifest) {
-    throw new Error("bundle is missing 'manifest'");
-  }
-  if (!parsed.signatures) {
-    throw new Error("bundle is missing 'signatures'");
-  }
-  const enrollment = parseEnrollmentObject(parsed.enrollment);
-  const manifest = parseManifestDocumentObject({
-    manifest: parsed.manifest,
-    signatures: parsed.signatures,
-  });
-  return { enrollment, manifest };
-}
-
-async function runSigsumSubmit(policyPath: string, keyPath: string, payloadPath: string): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn("sigsum-submit", ["-p", policyPath, "-k", keyPath, payloadPath], {
-      stdio: "inherit",
-    });
-    child.on("error", (err) => {
-      reject(new Error(`failed to launch sigsum-submit: ${err.message}`));
-    });
-    child.on("exit", (code, signal) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      if (signal) {
-        reject(new Error(`sigsum-submit terminated via signal ${signal}`));
-      } else {
-        reject(new Error(`sigsum-submit exited with code ${code ?? 1}`));
-      }
-    });
-  });
-}
-
-function parseCosignedTreeHead(text: string) {
-  const signedTreeHead: any = {};
-  const treeHead: any = {};
-  const cosignatures = new Map<Base64KeyHash, { Timestamp: number; Signature: Signature }>();
-  const lines = text.split(/\r?\n/);
-  for (const rawLine of lines) {
-    const line = rawLine.trim();
-    if (line.length === 0) {
-      continue;
-    }
-    if (line.startsWith("cosignature=")) {
-      const [, rest] = line.split("=", 2);
-      const parts = rest.trim().split(/\s+/);
-      if (parts.length !== 3) {
-        throw new Error("invalid cosignature format in timestamp");
-      }
-      const [keyHashHex, timestampStr, signatureHex] = parts;
-      const timestamp = Number(timestampStr);
-      if (!Number.isFinite(timestamp) || timestamp <= 0) {
-        throw new Error("invalid cosignature timestamp");
-      }
-      const signature = new Signature(hexToUint8Array(signatureHex));
-      cosignatures.set(new Base64KeyHash(hexToBase64(keyHashHex)), {
-        Timestamp: timestamp,
-        Signature: signature,
-      });
-      continue;
-    }
-    const [key, value] = line.split("=");
-    if (!key || value === undefined) {
-      continue;
-    }
-    if (key === "size" || key === "tree_size") {
-      const size = Number(value);
-      if (!Number.isFinite(size) || size <= 0) {
-        throw new Error("invalid tree size in timestamp");
-      }
-      treeHead.Size = size;
-      continue;
-    }
-    if (key === "root_hash") {
-      treeHead.RootHash = new Hash(hexToUint8Array(value));
-      continue;
-    }
-    if (key === "signature") {
-      signedTreeHead.Signature = new Signature(hexToUint8Array(value));
-      continue;
-    }
-  }
-  if (!treeHead.Size || !treeHead.RootHash) {
-    throw new Error("timestamp missing tree head fields");
-  }
-  if (!signedTreeHead.Signature) {
-    throw new Error("timestamp missing log signature");
-  }
-  signedTreeHead.TreeHead = treeHead;
-  return {
-    SignedTreeHead: signedTreeHead,
-    Cosignatures: cosignatures,
-  };
-}
-
-async function fetchTimestampFromPolicy(policyText: string): Promise<string> {
-  const policy = await parsePolicyText(policyText);
-  const availableLogs = Array.from(policy.logs.entries()).filter(([, entity]) => typeof entity.url === "string" && entity.url.length > 0);
-  if (availableLogs.length === 0) {
-    throw new Error("policy does not list any logs with URLs for timestamp retrieval");
-  }
-  const selected = availableLogs[Math.floor(Math.random() * availableLogs.length)];
-  const [, logEntity] = selected;
-  const baseUrl = (logEntity.url as string).replace(/\/+$/, "");
-  const requestUrl = `${baseUrl}/get-tree-head`;
-  let response: Response;
-  try {
-    response = await fetch(requestUrl);
-  } catch (err: any) {
-    throw new Error(`failed to fetch timestamp from ${requestUrl}: ${err.message}`);
-  }
+async function fetchOidcConfiguration(issuer: string): Promise<OidcConfig> {
+  const trimmed = issuer.replace(/\/+$/, "");
+  const response = await fetch(`${trimmed}/.well-known/openid-configuration`);
   if (!response.ok) {
-    throw new Error(`timestamp request failed (${response.status} ${response.statusText})`);
+    throw new Error(`failed to load OIDC configuration (${response.status} ${response.statusText})`);
   }
-  const body = await response.text();
-  const trimmed = body.trim();
-  const treeHead = parseCosignedTreeHead(trimmed);
-  const logKeyHash = await hashKey(logEntity.publicKey);
-  if (!(await verifySignedTreeHead(treeHead.SignedTreeHead, logEntity.publicKey, logKeyHash))) {
-    throw new Error("timestamp tree head signature is invalid");
+  const parsed = (await response.json()) as OidcConfig;
+  return parsed;
+}
+
+async function requestDeviceAuthorization(
+  issuer: string,
+  clientId: string,
+  scope: string,
+  pkce: PkcePair,
+): Promise<DeviceAuthResponse> {
+  const config = await fetchOidcConfiguration(issuer);
+  if (!config.device_authorization_endpoint) {
+    throw new Error("OIDC configuration is missing device authorization endpoint");
   }
-  const present = new Set<Base64KeyHash>();
-  for (const [keyHash, entity] of policy.witnesses) {
-    const cosig = Base64KeyHash.lookup(treeHead.Cosignatures, keyHash);
-    if (!cosig) {
+  const response = await fetch(config.device_authorization_endpoint, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: clientId,
+      scope,
+      code_challenge: pkce.challenge,
+      code_challenge_method: "S256",
+    }).toString(),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `failed to request device authorization (${response.status} ${response.statusText})`,
+    );
+  }
+  return (await response.json()) as DeviceAuthResponse;
+}
+
+async function exchangeDeviceCode(
+  issuer: string,
+  clientId: string,
+  deviceCode: string,
+  intervalSeconds: number,
+  pkce: PkcePair,
+): Promise<string> {
+  const config = await fetchOidcConfiguration(issuer);
+  if (!config.token_endpoint) {
+    throw new Error("OIDC configuration is missing token endpoint");
+  }
+  let interval = Math.max(intervalSeconds, 1);
+  const started = Date.now();
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+    const response = await fetch(config.token_endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: deviceCode,
+        client_id: clientId,
+        code_verifier: pkce.verifier,
+      }).toString(),
+    });
+    const payload = (await response.json()) as {
+      access_token?: string;
+      id_token?: string;
+      error?: string;
+    };
+    if (payload.id_token) {
+      return payload.id_token;
+    }
+    if (payload.access_token) {
+      throw new Error("OIDC device authorization returned access_token but no id_token");
+    }
+    if (payload.error === "authorization_pending") {
       continue;
     }
-    if (await verifyCosignedTreeHead(treeHead.SignedTreeHead.TreeHead, entity.publicKey, logKeyHash, cosig)) {
-      present.add(keyHash);
-      if (policy.quorum.isQuorum(present)) {
-        return trimmed;
-      }
+    if (payload.error === "slow_down") {
+      interval += 5;
+      continue;
+    }
+    if (payload.error === "expired_token") {
+      throw new Error("OIDC device code expired before authorization completed");
+    }
+    if (payload.error) {
+      throw new Error(`OIDC device authorization failed: ${payload.error}`);
+    }
+    if (Date.now() - started > 10 * 60 * 1000) {
+      throw new Error("OIDC device authorization timed out");
     }
   }
-  throw new Error("timestamp does not satisfy witness quorum");
+}
+
+function openBrowser(url: string): void {
+  const platform = process.platform;
+  let command: string;
+  let args: string[];
+  if (platform === "darwin") {
+    command = "open";
+    args = [url];
+  } else if (platform === "win32") {
+    command = "cmd";
+    args = ["/c", "start", "", url];
+  } else {
+    command = "xdg-open";
+    args = [url];
+  }
+  try {
+    const child = spawn(command, args, { stdio: "ignore", detached: true });
+    child.unref();
+  } catch {
+    // Best-effort only.
+  }
+}
+
+async function fetchInteractiveOidcToken(
+  issuer: string,
+  clientId: string,
+  scope: string,
+  openBrowserWindow: boolean,
+): Promise<string> {
+  const pkce = createPkcePair();
+  const deviceAuth = await requestDeviceAuthorization(issuer, clientId, scope, pkce);
+  const verificationUrl = deviceAuth.verification_uri_complete ?? deviceAuth.verification_uri;
+  process.stdout.write(
+    `Open ${verificationUrl} in a browser and enter code ${deviceAuth.user_code} to authenticate.\n`,
+  );
+  if (openBrowserWindow) {
+    openBrowser(verificationUrl);
+  }
+  const interval = deviceAuth.interval ?? 5;
+  return await exchangeDeviceCode(issuer, clientId, deviceAuth.device_code, interval, pkce);
+}
+
+function createPkcePair(): PkcePair {
+  const verifier = toBase64Url(randomBytes(32));
+  const challenge = toBase64Url(createHash("sha256").update(verifier).digest());
+  return { verifier, challenge };
+}
+
+function parseTrustedRootJson(value: string, source: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error("must be a JSON object");
+    }
+    return parsed as Record<string, unknown>;
+  } catch (err: any) {
+    throw new Error(`failed to parse trusted root from ${source}: ${err.message}`);
+  }
 }
 
 const program = new Command();
@@ -625,33 +269,111 @@ const enrollment = program.command("enrollment").description("Enrollment helpers
 enrollment
   .command("create")
   .description("Create an enrollment definition")
-  .requiredOption("-p, --policy-file <path>", "Sigsum policy file to compile")
-  .requiredOption("-s, --signer <key>", "Signer public key (hex or base64)", collectSigner, [] as string[])
-  .requiredOption("-t, --threshold <k>", "Threshold for signature approval")
-  .requiredOption("-m, --max-age <seconds>", "Maximum age in seconds")
-  .requiredOption("-c, --cas-url <url>", "CAS https URL")
+  .option("-p, --policy-file <path>", "Sigsum policy file to compile")
+  .option("-s, --signer <key>", "Signer public key (hex or base64)", collectSigner, [] as string[])
+  .option("-t, --threshold <k>", "Threshold for signature approval")
+  .option("-m, --max-age <seconds>", "Maximum age in seconds")
+  .option("-c, --cas-url <url>", "CAS https URL")
+  .option("--type <type>", "Enrollment type (sigsum or sigstore)", "sigsum")
+  .option("--trusted-root <path>", "Sigstore trusted root file")
+  .option("--community-trusted-root", "Fetch the Sigstore community trusted root via TUF")
+  .option("--issuer <value>", "Sigstore issuer")
+  .option("--identity <value>", "Sigstore identity")
   .option("-o, --output <path>", "Write result to file instead of stdout")
   .action(async (options: {
-    policyFile: string;
+    policyFile?: string;
     signer: string[];
-    threshold: number | string;
-    maxAge: number | string;
-    casUrl: string;
+    threshold?: number | string;
+    maxAge?: number | string;
+    casUrl?: string;
+    type?: string;
+    trustedRoot?: string;
+    communityTrustedRoot?: boolean;
+    issuer?: string;
+    identity?: string;
     output?: string;
   }) => {
-    const policyText = await readFile(options.policyFile, "utf8");
-    const compiled = await compilePolicy(policyText);
-    const policyEncoded = toBase64Url(compiled);
+    const enrollmentType = options.type ?? "sigsum";
+    if (enrollmentType !== "sigsum" && enrollmentType !== "sigstore") {
+      throw new Error("enrollment type must be 'sigsum' or 'sigstore'");
+    }
 
-    const enrollmentObject = buildEnrollmentObject({
-      policy: policyEncoded,
-      signers: options.signer,
-      threshold: options.threshold,
-      maxAge: options.maxAge,
-      casUrl: options.casUrl,
-    });
+    let enrollmentObject: EnrollmentInput;
+    if (enrollmentType === "sigsum") {
+      if (!options.policyFile) {
+        throw new Error("--policy-file is required for sigsum enrollments");
+      }
+      if (!options.threshold) {
+        throw new Error("--threshold is required for sigsum enrollments");
+      }
+      if (!options.maxAge) {
+        throw new Error("--max-age is required for sigsum enrollments");
+      }
+      if (!options.casUrl) {
+        throw new Error("--cas-url is required for sigsum enrollments");
+      }
+
+      const policyText = await readFile(options.policyFile, "utf8");
+      const compiled = await compilePolicy(policyText);
+      const policyEncoded = toBase64Url(compiled);
+      const parsedPolicy = await parsePolicyText(policyText);
+      const logsEntries = await Promise.all(
+        Array.from(parsedPolicy.logs.values()).map(async (entity) => {
+          const rawKey = await crypto.subtle.exportKey("raw", entity.publicKey.key);
+          const key = toBase64Url(new Uint8Array(rawKey));
+          const url = typeof entity.url === "string" ? entity.url : "";
+          return [key, url] as const;
+        })
+      );
+      logsEntries.sort(([a], [b]) => a.localeCompare(b));
+      const logs = Object.fromEntries(logsEntries);
+
+      enrollmentObject = buildEnrollmentObject({
+        type: "sigsum",
+        policy: policyEncoded,
+        signers: options.signer,
+        threshold: options.threshold,
+        maxAge: options.maxAge,
+        casUrl: options.casUrl,
+        logs,
+      });
+    } else {
+      if (options.communityTrustedRoot && options.trustedRoot) {
+        throw new Error("use either --trusted-root or --community-trusted-root for sigstore enrollments");
+      }
+      if (!options.trustedRoot && !options.communityTrustedRoot) {
+        throw new Error("--trusted-root or --community-trusted-root is required for sigstore enrollments");
+      }
+      if (!options.issuer) {
+        throw new Error("--issuer is required for sigstore enrollments");
+      }
+      if (!options.identity) {
+        throw new Error("--identity is required for sigstore enrollments");
+      }
+      if (!options.maxAge) {
+        throw new Error("--max-age is required for sigstore enrollments");
+      }
+      const trustedRoot = options.communityTrustedRoot
+        ? parseTrustedRootJson(
+            await fetchSigstoreCommunityTrustedRoot(),
+            "Sigstore TUF community trusted root",
+          )
+        : parseTrustedRootJson(
+            await readFile(options.trustedRoot, "utf8"),
+            options.trustedRoot,
+          );
+      enrollmentObject = buildEnrollmentObject({
+        type: "sigstore",
+        trustedRoot,
+        issuer: options.issuer,
+        identity: options.identity,
+        maxAge: options.maxAge,
+      });
+    }
 
     const json = JSON.stringify(enrollmentObject, null, 2);
+    const { hash, filePath } = await writeCasObject(json);
+    process.stdout.write(`Saved enrollment to ${filePath} (sha256=${hash}).\n`);
     await writeMaybe(options.output, json);
   });
 
@@ -684,21 +406,32 @@ const manifest = program.command("manifest").description("Manifest helpers");
 manifest
   .command("generate")
   .description("Generate a manifest from a directory and config")
+  .option("--type <type>", "Manifest type (sigsum or sigstore)", "sigsum")
   .requiredOption("-c, --config <path>", "Manifest config JSON file")
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
-  .requiredOption("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
+  .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(
     async (options: {
+      type?: string;
       config: string;
       directory: string;
-      policyFile: string;
+      policyFile?: string;
+      includeDotfiles?: boolean;
       output?: string;
     }) => {
+      const type = options.type ?? "sigsum";
+      if (type !== "sigsum" && type !== "sigstore") {
+        throw new Error("manifest type must be 'sigsum' or 'sigstore'");
+      }
+      if (type === "sigsum" && !options.policyFile) {
+        throw new Error("--policy-file is required for sigsum manifests");
+      }
       const [config, scan, policyText] = await Promise.all([
         loadManifestConfig(options.config),
-        scanDirectory(options.directory),
-        readFile(options.policyFile, "utf8"),
+        scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles }),
+        type === "sigsum" && options.policyFile ? readFile(options.policyFile, "utf8") : Promise.resolve(""),
       ]);
       const indexKey = "/" + config.default_index.replace(/^\/+/, "");
       if (!scan.files.has(indexKey)) {
@@ -707,7 +440,7 @@ manifest
       if (!scan.files.has(config.default_fallback)) {
         throw new Error(`default_fallback ${config.default_fallback} was not found in the scanned files`);
       }
-      const timestamp = await fetchTimestampFromPolicy(policyText);
+      const timestamp = type === "sigsum" ? await fetchTimestampFromPolicy(policyText) : undefined;
       const filesObject = Object.fromEntries(
         Array.from(scan.files.entries()).sort(([a], [b]) => a.localeCompare(b))
       );
@@ -715,19 +448,21 @@ manifest
       const extraCsp = Object.fromEntries(
         Object.entries(config.extra_csp).sort(([a], [b]) => a.localeCompare(b))
       );
+      const manifest: ManifestContent = {
+        app: config.app,
+        version: config.version,
+        default_csp: config.default_csp,
+        files: filesObject,
+        default_index: config.default_index,
+        default_fallback: config.default_fallback,
+        wasm: wasmList,
+        extra_csp: extraCsp,
+      };
+      if (timestamp) {
+        manifest.timestamp = timestamp;
+      }
       const manifestDocument: ManifestDocument = {
-        manifest: {
-          app: config.app,
-          version: config.version,
-          default_csp: config.default_csp,
-          files: filesObject,
-          default_index: config.default_index,
-          default_fallback: config.default_fallback,
-          timestamp,
-          wasm: wasmList,
-          extra_csp: extraCsp,
-        },
-        signatures: {},
+        manifest,
       };
       const json = JSON.stringify(manifestDocument, null, 2);
       await writeMaybe(options.output, json);
@@ -736,47 +471,167 @@ manifest
 
 manifest
   .command("sign")
-  .description("Use sigsum-submit to sign a manifest and attach the proof")
+  .description("Sign a manifest with sigsum (default) or sigstore")
+  .option("--type <type>", "Signature type (sigsum or sigstore)", "sigsum")
   .requiredOption("-i, --input <path>", "Manifest file to sign")
-  .requiredOption("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
-  .requiredOption("-k, --key <path>", "Sigsum private key for signing")
+  .option("-p, --policy-file <path>", "Sigsum trust policy file for sigsum-submit")
+  .option("-k, --key <path>", "Sigsum private key for signing")
+  .option(
+    "--bundle-type <type>",
+    "Sigstore bundle type to generate (message or dsse)",
+    "message",
+  )
+  .option("--fulcio-url <url>", "Sigstore Fulcio base URL", DEFAULT_FULCIO_URL)
+  .option("--rekor-url <url>", "Sigstore Rekor base URL", DEFAULT_REKOR_URL)
+  .option("--tsa-url <url>", "Sigstore timestamp authority base URL")
+  .option("--oidc-audience <value>", "OIDC audience for CI identity provider", "sigstore")
+  .option("--oidc-issuer <url>", "OIDC issuer for interactive login", SIGSTORE_OIDC_ISSUER)
+  .option("--oidc-client-id <value>", "OIDC client ID for interactive login", SIGSTORE_OIDC_CLIENT_ID)
+  .option("--oidc-scope <value>", "OIDC scope for interactive login", SIGSTORE_OIDC_SCOPE)
+  .option("--oidc-token <value>", "Explicit OIDC ID token to use for Sigstore signing")
+  .option("--interactive", "Use OIDC device authorization flow for Sigstore signing")
+  .option("--no-open-browser", "Do not open a browser window for device authorization")
   .option("-o, --output <path>", "Write updated manifest to a file")
   .action(
     async (options: {
+      type?: string;
       input: string;
-      policyFile: string;
-      key: string;
+      policyFile?: string;
+      key?: string;
+      bundleType?: string;
+      fulcioUrl?: string;
+      rekorUrl?: string;
+      tsaUrl?: string;
+      oidcAudience?: string;
+      oidcIssuer?: string;
+      oidcClientId?: string;
+      oidcScope?: string;
+      oidcToken?: string;
+      interactive?: boolean;
+      openBrowser?: boolean;
       signer: string;
       output?: string;
     }) => {
+      const type = options.type ?? "sigsum";
+      if (type !== "sigsum" && type !== "sigstore") {
+        throw new Error("sign type must be 'sigsum' or 'sigstore'");
+      }
       const document = await loadManifestDocument(options.input);
       const canonicalManifest = canonicalizeManifestBody(document);
-      const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
-      if (document.signatures[signerKey]) {
-        throw new Error("manifest already contains a signature for this signer");
-      }
-      const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
-      const tempFile = path.join(tempDir, "manifest.json");
-      try {
-        await writeFile(tempFile, canonicalManifest);
-        await runSigsumSubmit(options.policyFile, options.key, tempFile);
-        const proofPath = `${tempFile}.proof`;
-        let proofText: string;
+
+      if (type === "sigsum") {
+        if (!options.policyFile) {
+          throw new Error("--policy-file is required for sigsum signing");
+        }
+        if (!options.key) {
+          throw new Error("--key is required for sigsum signing");
+        }
+        const signerKey = await deriveSignerKeyFromPrivateKey(options.key);
+        if (Array.isArray(document.signatures)) {
+          throw new Error("manifest already contains sigstore signatures");
+        }
+        if (!Array.isArray(document.signatures) && document.signatures?.[signerKey]) {
+          throw new Error("manifest already contains a signature for this signer");
+        }
+        if (!document.signatures || Array.isArray(document.signatures)) {
+          document.signatures = {};
+        }
+        const tempDir = await mkdtemp(path.join(tmpdir(), "webcat-manifest-"));
+        const tempFile = path.join(tempDir, "manifest.json");
         try {
-          const proofRaw = await readFile(proofPath, "utf8");
-          proofText = proofRaw.trim();
-        } catch (err: any) {
-          throw new Error(`failed to read Sigsum proof (${err.message})`);
+          await writeFile(tempFile, canonicalManifest);
+          await runSigsumSubmit(options.policyFile, options.key, tempFile);
+          const proofPath = `${tempFile}.proof`;
+          let proofText: string;
+          try {
+            const proofRaw = await readFile(proofPath, "utf8");
+            proofText = proofRaw.trim();
+          } catch (err: any) {
+            throw new Error(`failed to read Sigsum proof (${err.message})`);
+          }
+          if (proofText.length === 0) {
+            throw new Error("Sigsum proof was empty");
+          }
+          const proof = await SigsumProof.fromAscii(proofText);
+          const messageHash = createHash("sha256").update(canonicalManifest).digest();
+          const checksum = new Hash(createHash("sha256").update(messageHash).digest());
+          const leaf = new Leaf(
+            checksum,
+            new Signature(proof.leaf.Signature.bytes),
+            new KeyHash(proof.leaf.KeyHash.bytes),
+          );
+          const leafBytes = leaf.toBytes();
+          const { hash: leafHash, filePath: leafPath } = await writeCasObject(leafBytes, {
+            upload: true,
+          });
+          process.stdout.write(`Saved raw Sigsum leaf to ${leafPath} (sha256=${leafHash}).\n`);
+          const { hash: checksumHash, filePath: checksumPath } = await writeCasObject(messageHash, {
+            upload: true,
+          });
+          process.stdout.write(`Saved Sigsum checksum payload to ${checksumPath} (sha256=${checksumHash}).\n`);
+          const { hash: manifestHash, filePath: manifestPath } = await writeCasObject(
+            canonicalManifest,
+            { upload: true },
+          );
+          process.stdout.write(`Saved canonical manifest to ${manifestPath} (sha256=${manifestHash}).\n`);
+          document.signatures[signerKey] = proofText;
+        } finally {
+          await rm(tempDir, { recursive: true, force: true });
         }
-        if (proofText.length === 0) {
-          throw new Error("Sigsum proof was empty");
-        }
-        document.signatures[signerKey] = proofText;
         const json = JSON.stringify(document, null, 2);
         await writeMaybe(options.output, json);
-      } finally {
-        await rm(tempDir, { recursive: true, force: true });
+        return;
       }
+
+      const bundleType = options.bundleType ?? "message";
+      if (bundleType !== "message" && bundleType !== "dsse") {
+        throw new Error("bundle type must be 'message' or 'dsse'");
+      }
+      if (options.oidcToken && options.interactive) {
+        throw new Error("use either --oidc-token or --interactive, not both");
+      }
+      let identityProvider: CIContextProvider | { getToken: () => Promise<string> };
+      if (options.oidcToken) {
+        const token = options.oidcToken;
+        identityProvider = { getToken: async () => token };
+      } else if (options.interactive) {
+        const issuer = options.oidcIssuer ?? SIGSTORE_OIDC_ISSUER;
+        const clientId = options.oidcClientId ?? SIGSTORE_OIDC_CLIENT_ID;
+        const scope = options.oidcScope ?? SIGSTORE_OIDC_SCOPE;
+        const openBrowserWindow = options.openBrowser ?? true;
+        const token = await fetchInteractiveOidcToken(issuer, clientId, scope, openBrowserWindow);
+        identityProvider = { getToken: async () => token };
+      } else {
+        identityProvider = new CIContextProvider(options.oidcAudience ?? "sigstore");
+      }
+      const signer = new FulcioSigner({
+        fulcioBaseURL: options.fulcioUrl ?? DEFAULT_FULCIO_URL,
+        identityProvider,
+      });
+      const witnesses = [
+        new RekorWitness({ rekorBaseURL: options.rekorUrl ?? DEFAULT_REKOR_URL }),
+      ];
+      if (options.tsaUrl) {
+        witnesses.push(new TSAWitness({ tsaBaseURL: options.tsaUrl }));
+      }
+      const builder =
+        bundleType === "dsse"
+          ? new DSSEBundleBuilder({ signer, witnesses })
+          : new MessageSignatureBundleBuilder({ signer, witnesses });
+      const bundle = await builder.create({
+        data: Buffer.from(canonicalManifest),
+        type: "application/json",
+      });
+      const serializedBundle = bundleToJSON(bundle);
+      if (document.signatures && !Array.isArray(document.signatures)) {
+        throw new Error("manifest already contains sigsum signatures");
+      }
+      if (!document.signatures || !Array.isArray(document.signatures)) {
+        document.signatures = [];
+      }
+      document.signatures.push(serializedBundle);
+      const json = JSON.stringify(document, null, 2);
+      await writeMaybe(options.output, json);
     }
   );
 
@@ -828,21 +683,24 @@ manifest
         enrollment = bundle.enrollment;
         manifestDocument = bundle.manifest;
       }
-
+      if (enrollment.type !== "sigsum") {
+        throw new Error("manifest verification is only supported for sigsum enrollments");
+      }
       const canonicalManifest = canonicalizeManifestBody(manifestDocument);
       const manifestHash = new Uint8Array(
         createHash("sha256").update(canonicalManifest).digest(),
       );
       const compiledPolicy = decodePolicyBytes(enrollment.policy);
-      const policyHash = createHash("sha256")
-        .update(compiledPolicy)
-        .digest("base64url");
+      const policyHash = hashPolicyBytes(enrollment.policy);
 
       const signerResults: { signer: string; ok: boolean; message?: string }[] = [];
       let verified = 0;
 
       for (const signer of enrollment.signers) {
-        const proofText = manifestDocument.signatures[signer];
+        const proofText =
+          manifestDocument.signatures && !Array.isArray(manifestDocument.signatures)
+            ? manifestDocument.signatures[signer]
+            : undefined;
         if (!proofText) {
           signerResults.push({ signer, ok: false, message: "signature missing" });
           continue;
@@ -906,30 +764,6 @@ bundle
       await writeMaybe(options.output, json);
     }
   );
-
-
-export const testExports = {
-  toBase64Url,
-  decodeKeyMaterial,
-  parseSignerKey,
-  parseInteger,
-  validateMaxAge,
-  validateCasUrl,
-  buildEnrollmentObject,
-  parseEnrollmentObject,
-  loadEnrollment,
-  ensureNonEmptyString,
-  ensureAbsolutePath,
-  ensureRecordOfStrings,
-  loadManifestConfig,
-  scanDirectory,
-  parseManifestDocumentObject,
-  loadManifestDocument,
-  canonicalizeManifestBody,
-  decodePolicyBytes,
-  loadBundleDocument,
-  hexToBase64Url,
-};
 
 if (process.env.NODE_ENV !== "test") {
   program.parseAsync(process.argv).catch((err: any) => {
