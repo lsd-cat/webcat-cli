@@ -47,11 +47,11 @@ jobs:
         with:
           repository: freedomofpress/webcat-cli
           ref: main
-          path: ${{ runner.temp }}/webcat-cli
+          path: webcat-cli
 
       # 4. Install webcat-cli dependencies
       - name: Install webcat-cli dependencies
-        working-directory: ${{ runner.temp }}/webcat-cli
+        working-directory: webcat-cli
         run: npm ci
 
       # 5. Generate unsigned manifest
@@ -61,7 +61,7 @@ jobs:
 
           mkdir -p "$(dirname "${{ inputs.manifest_path }}")"
 
-          npx --prefix "${{ runner.temp }}/webcat-cli" tsx src/cli.ts manifest generate \
+          npx tsx webcat-cli/src/cli.ts manifest generate \
             --type sigstore \
             --config "${{ inputs.config }}" \
             --directory "${{ inputs.directory }}" \
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          npx --prefix "${{ runner.temp }}/webcat-cli" tsx src/cli.ts manifest sign \
+          npx tsx webcat-cli/src/cli.ts manifest sign \
             --type sigstore \
             --input "${{ inputs.manifest_path }}" \
             --oidc-token "${{ steps.oidc.outputs.token }}"
