@@ -1,4 +1,4 @@
-name: Generate and Commit WebCAT Manifest (Sigstore)
+name: Generate and Commit WEBCAT Manifest
 
 on:
   workflow_call:
@@ -47,21 +47,21 @@ jobs:
         with:
           repository: freedomofpress/webcat-cli
           ref: main
-          path: webcat-cli
+          path: ${{ runner.temp }}/webcat-cli
 
       # 4. Install webcat-cli dependencies
       - name: Install webcat-cli dependencies
-        working-directory: webcat-cli
+        working-directory: ${{ runner.temp }}/webcat-cli
         run: npm ci
 
       # 5. Generate unsigned manifest
-      - name: Generate WebCAT manifest
+      - name: Generate WEBCAT manifest
         run: |
           set -euo pipefail
 
           mkdir -p "$(dirname "${{ inputs.manifest_path }}")"
 
-          npx tsx webcat-cli/src/cli.ts manifest generate \
+          npx --prefix "${{ runner.temp }}/webcat-cli" tsx src/cli.ts manifest generate \
             --type sigstore \
             --config "${{ inputs.config }}" \
             --directory "${{ inputs.directory }}" \
@@ -85,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          npx tsx webcat-cli/src/cli.ts manifest sign \
+          npx --prefix "${{ runner.temp }}/webcat-cli" tsx src/cli.ts manifest sign \
             --type sigstore \
             --input "${{ inputs.manifest_path }}" \
             --oidc-token "${{ steps.oidc.outputs.token }}"
