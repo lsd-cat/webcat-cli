@@ -21,6 +21,11 @@ on:
         type: string
         required: false
         default: ".well-known/webcat/enrollment.json"
+      bundle_path:
+        type: string
+        required: false
+        default: ".well-known/webcat/bundle.json"
+
 
 permissions:
   contents: write
@@ -62,12 +67,14 @@ jobs:
           IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
           ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+          BUNDLE_PATH: ${{ inputs.bundle_path }}
         run: |
           set -euo pipefail
 
           tmp_file="$(mktemp)"
           directory="$(dirname "$ENROLLMENT_PATH")"
           prev_path="${directory}/enrollment-prev.json"
+          prev_bundle_path="${directory}/bundle-prev.json"
 
           mkdir -p "$directory"
 
@@ -87,6 +94,7 @@ jobs:
             fi
 
             cp "$ENROLLMENT_PATH" "$prev_path"
+            cp "$BUNDLE_PATH" "$prev_bundle_path"
           fi
 
           mv "$tmp_file" "$ENROLLMENT_PATH"
