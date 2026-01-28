@@ -86,16 +86,23 @@ jobs:
             --max-age "$MAX_AGE" \
             --output "$tmp_file"
 
-          if [ -f "$ENROLLMENT_PATH" ]; then
-            if cmp -s "$tmp_file" "$ENROLLMENT_PATH"; then
-              echo "changed=false" >> "$GITHUB_OUTPUT"
-              rm -f "$tmp_file"
-              exit 0
-            fi
-
-            cp "$ENROLLMENT_PATH" "$prev_path"
-            cp "$BUNDLE_PATH" "$prev_bundle_path"
+          # Fresh start: no existing enrollment
+          if [ ! -f "$ENROLLMENT_PATH" ]; then
+            mv "$tmp_file" "$ENROLLMENT_PATH"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+
+          # Existing enrollment: check for changes
+          if cmp -s "$tmp_file" "$ENROLLMENT_PATH"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            rm -f "$tmp_file"
+            exit 0
+          fi
+
+          # Save previous version
+          cp "$ENROLLMENT_PATH" "$prev_path"
+          [ -f "$BUNDLE_PATH" ] && cp "$BUNDLE_PATH" "$prev_bundle_path"
 
           mv "$tmp_file" "$ENROLLMENT_PATH"
           echo "changed=true" >> "$GITHUB_OUTPUT"
