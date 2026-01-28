@@ -17,14 +17,26 @@ on:
         type: string
         required: false
         default: "20"
-      enrollment_path:
+      webcat_path:
         type: string
         required: false
-        default: ".well-known/webcat/enrollment.json"
-      bundle_path:
+        default: ".well-known/webcat/"
+      enrollment_file:
         type: string
         required: false
-        default: ".well-known/webcat/bundle.json"
+        default: "enrollment.json"
+      enrollment_prev_file:
+        type: string
+        required: false
+        default: "enrollment-prev.json"
+      bundle_file:
+        type: string
+        required: false
+        default: "bundle.json"
+      bundle_prev_file:
+        type: string
+        required: false
+        default: "bundle-prev.json"
 
 
 permissions:
@@ -66,17 +78,17 @@ jobs:
           ISSUER: ${{ inputs.issuer }}
           IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
-          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
-          BUNDLE_PATH: ${{ inputs.bundle_path }}
+          WEBCAT_PATH: ${{ inputs.webcat_path }}
+          ENROLLMENT_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_file }}
+          ENROLLMENT_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.enrollment_prev_file }}
+          BUNDLE_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_file }}
+          BUNDLE_PREV_PATH: ${{ inputs.webcat_path }}${{ inputs.bundle_prev_file }}
         run: |
           set -euo pipefail
 
           tmp_file="$(mktemp)"
-          directory="$(dirname "$ENROLLMENT_PATH")"
-          prev_path="${directory}/enrollment-prev.json"
-          prev_bundle_path="${directory}/bundle-prev.json"
 
-          mkdir -p "$directory"
+          mkdir -p "$WEBCAT_PATH"
 
           npx tsx webcat-cli/src/cli.ts enrollment create \
             --type sigstore \
@@ -101,8 +113,8 @@ jobs:
           fi
 
           # Save previous version
-          cp "$ENROLLMENT_PATH" "$prev_path"
-          [ -f "$BUNDLE_PATH" ] && cp "$BUNDLE_PATH" "$prev_bundle_path"
+          cp "$ENROLLMENT_PATH" "$ENROLLMENT_PREV_PATH"
+          [ -f "$BUNDLE_PATH" ] && cp "$BUNDLE_PATH" "$BUNDLE_PREV_PATH"
 
           mv "$tmp_file" "$ENROLLMENT_PATH"
           echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -114,7 +126,7 @@ jobs:
           ISSUER: ${{ inputs.issuer }}
           IDENTITY: ${{ inputs.identity }}
           MAX_AGE: ${{ inputs.max_age }}
-          ENROLLMENT_PATH: ${{ inputs.enrollment_path }}
+          ENROLLMENT_PATH: ${{ inputs.webcat_path }}/${{ inputs.enrollment_file }}
         run: |
           set -euo pipefail
 
@@ -145,5 +157,4 @@ jobs:
           branch: "chore/update-sigstore-enrollment"
           delete-branch: false
           add-paths: |
-            ${{ inputs.enrollment_path }}
-            .well-known/webcat/enrollment-prev.json
+            ${{ inputs.webcat_path }}
