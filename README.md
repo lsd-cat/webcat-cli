@@ -289,13 +289,13 @@ npm run start -- manifest verify bundle.json
 The script prints intermediate JSON artifacts with `jq` so you can inspect the
 resulting enrollment, manifest, and bundle.
 
-## `webcat.config.ts` schema
+## `webcat.config.json` schema
 
-The manifest generator expects a Webcat config file (commonly `webcat.config.ts`
+The manifest generator expects a Webcat config file (commonly `webcat.config.json`
 or a JSON equivalent) matching the schema below:
 
 | Field | Type | Description |
-| --- | --- | --- | --- |
+| --- | --- | --- |
 | `app` | string | Origin URL of the application being packaged. |
 | `version` | string | Git tag to be used for reproducibility and auditing. |
 | `default_csp` | string | Base Content-Security-Policy applied to all assets. |
