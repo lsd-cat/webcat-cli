@@ -21,6 +21,7 @@ import {
   MessageSignatureBundleBuilder,
   RekorWitness,
   TSAWitness,
+  type Witness,
 } from "@sigstore/sign";
 import { Updater } from "tuf-js";
 import { canonicalize } from "./canonicalize";
@@ -28,6 +29,7 @@ import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enroll
 import { writeCasObject } from "./cas";
 import {
   ManifestDocument,
+  ManifestContent,
   canonicalizeManifestBody,
   loadManifestConfig,
   loadManifestDocument,
@@ -353,15 +355,22 @@ enrollment
       if (!options.maxAge) {
         throw new Error("--max-age is required for sigstore enrollments");
       }
-      const trustedRoot = options.communityTrustedRoot
-        ? parseTrustedRootJson(
-            await fetchSigstoreCommunityTrustedRoot(),
-            "Sigstore TUF community trusted root",
-          )
-        : parseTrustedRootJson(
-            await readFile(options.trustedRoot, "utf8"),
-            options.trustedRoot,
-          );
+      let trustedRoot: Record<string, unknown>;
+      if (options.communityTrustedRoot) {
+        trustedRoot = parseTrustedRootJson(
+          await fetchSigstoreCommunityTrustedRoot(),
+          "Sigstore TUF community trusted root",
+        );
+      } else {
+        const trustedRootPath = options.trustedRoot;
+        if (!trustedRootPath) {
+          throw new Error("--trusted-root is required for sigstore enrollments");
+        }
+        trustedRoot = parseTrustedRootJson(
+          await readFile(trustedRootPath, "utf8"),
+          trustedRootPath,
+        );
+      }
       enrollmentObject = buildEnrollmentObject({
         type: "sigstore",
         trustedRoot,
@@ -608,7 +617,7 @@ manifest
         fulcioBaseURL: options.fulcioUrl ?? DEFAULT_FULCIO_URL,
         identityProvider,
       });
-      const witnesses = [
+      const witnesses: Witness[] = [
         new RekorWitness({ rekorBaseURL: options.rekorUrl ?? DEFAULT_REKOR_URL }),
       ];
       if (options.tsaUrl) {

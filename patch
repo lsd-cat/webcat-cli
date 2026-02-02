@@ -1,0 +1,381 @@
+diff --git a/src/cas.ts b/src/cas.ts
+index 1933ef644755be82e355a133dcfe30c419edb4f6..615f91f84f6f77af2165f4d2e1c0e8aa9890a4ae 100644
+--- a/src/cas.ts
++++ b/src/cas.ts
+@@ -4,61 +4,61 @@ import path from "node:path";
+ import process from "node:process";
+ import { PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+ 
+ export interface CasWriteResult {
+   hash: string;
+   filePath: string;
+ }
+ 
+ interface CasUploadConfig {
+   endpoint: string;
+   bucket: string;
+   token: string;
+   region: string;
+ }
+ 
+ const casUploadConfig = loadCasUploadConfig();
+ let casS3Client: S3Client | null = null;
+ 
+ function loadCasUploadConfig(): CasUploadConfig | null {
+   const endpoint = process.env.WEBCAT_CAS_S3_ENDPOINT;
+   const bucket = process.env.WEBCAT_CAS_S3_BUCKET;
+   const token = process.env.WEBCAT_CAS_S3_TOKEN;
+   if (!endpoint && !bucket && !token) {
+     return null;
+   }
+-  const missing = [];
+-  if (!endpoint) {
+-    missing.push("WEBCAT_CAS_S3_ENDPOINT");
+-  }
+-  if (!bucket) {
+-    missing.push("WEBCAT_CAS_S3_BUCKET");
+-  }
+-  if (!token) {
+-    missing.push("WEBCAT_CAS_S3_TOKEN");
+-  }
+-  if (missing.length > 0) {
++  if (!endpoint || !bucket || !token) {
++    const missing = [];
++    if (!endpoint) {
++      missing.push("WEBCAT_CAS_S3_ENDPOINT");
++    }
++    if (!bucket) {
++      missing.push("WEBCAT_CAS_S3_BUCKET");
++    }
++    if (!token) {
++      missing.push("WEBCAT_CAS_S3_TOKEN");
++    }
+     throw new Error(`missing CAS upload environment variables: ${missing.join(", ")}`);
+   }
+   return {
+     endpoint,
+     bucket,
+     token,
+     region: process.env.WEBCAT_CAS_S3_REGION ?? "us-east-1",
+   };
+ }
+ 
+ async function uploadCasObject(hash: string, bytes: Uint8Array): Promise<void> {
+   if (!casUploadConfig) {
+     return;
+   }
+   if (!casS3Client) {
+     casS3Client = new S3Client({
+       endpoint: casUploadConfig.endpoint,
+       region: casUploadConfig.region,
+       credentials: {
+         accessKeyId: casUploadConfig.token,
+         secretAccessKey: casUploadConfig.token,
+       },
+       forcePathStyle: true,
+     });
+   }
+diff --git a/src/cli.ts b/src/cli.ts
+index 2edbe064cb46cd9f3ad21e62e1c5c7d347f9a0e5..e4f370152eff2b3ec7e8d0f7b054d257804cea58 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -1,55 +1,57 @@
+ #!/usr/bin/env node
+ import { Command } from "commander";
+ import { spawn } from "node:child_process";
+ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+ import { createHash, randomBytes } from "node:crypto";
+ import process from "node:process";
+ import path from "node:path";
+ import { tmpdir } from "node:os";
+ import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
+ import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
+ import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
+ import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
+ import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
+ import { bundleToJSON } from "@sigstore/bundle";
+ import {
+   CIContextProvider,
+   DEFAULT_FULCIO_URL,
+   DEFAULT_REKOR_URL,
+   DSSEBundleBuilder,
+   FulcioSigner,
+   MessageSignatureBundleBuilder,
+   RekorWitness,
+   TSAWitness,
++  type Witness,
+ } from "@sigstore/sign";
+ import { Updater } from "tuf-js";
+ import { canonicalize } from "./canonicalize";
+ import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
+ import { writeCasObject } from "./cas";
+ import {
+   ManifestDocument,
++  ManifestContent,
+   canonicalizeManifestBody,
+   loadManifestConfig,
+   loadManifestDocument,
+   scanDirectory,
+ } from "./manifest";
+ import { loadBundleDocument } from "./bundle";
+ import { deriveSignerKeyFromPrivateKey, fetchTimestampFromPolicy, runSigsumSubmit } from "./sigsum";
+ import { decodeKeyMaterial, decodePolicyBytes, hashPolicyBytes, toBase64Url } from "./utils";
+ 
+ const SIGSTORE_TUF_BASE_URL = "https://tuf-repo-cdn.sigstore.dev";
+ const SIGSTORE_TUF_ROOT_URL = `${SIGSTORE_TUF_BASE_URL}/1.root.json`;
+ const SIGSTORE_TUF_TARGETS_URL = `${SIGSTORE_TUF_BASE_URL}/targets`;
+ const SIGSTORE_TRUSTED_ROOT_TARGET = "trusted_root.json";
+ const SIGSTORE_OIDC_ISSUER = "https://oauth2.sigstore.dev/auth";
+ const SIGSTORE_OIDC_CLIENT_ID = "sigstore";
+ const SIGSTORE_OIDC_SCOPE = "openid email";
+ 
+ type DeviceAuthResponse = {
+   device_code: string;
+   user_code: string;
+   verification_uri: string;
+   verification_uri_complete?: string;
+   expires_in: number;
+   interval?: number;
+ };
+@@ -331,59 +333,66 @@ enrollment
+       enrollmentObject = buildEnrollmentObject({
+         type: "sigsum",
+         policy: policyEncoded,
+         signers: options.signer,
+         threshold: options.threshold,
+         maxAge: options.maxAge,
+         casUrl: options.casUrl,
+         logs,
+       });
+     } else {
+       if (options.communityTrustedRoot && options.trustedRoot) {
+         throw new Error("use either --trusted-root or --community-trusted-root for sigstore enrollments");
+       }
+       if (!options.trustedRoot && !options.communityTrustedRoot) {
+         throw new Error("--trusted-root or --community-trusted-root is required for sigstore enrollments");
+       }
+       if (!options.issuer) {
+         throw new Error("--issuer is required for sigstore enrollments");
+       }
+       if (!options.identity) {
+         throw new Error("--identity is required for sigstore enrollments");
+       }
+       if (!options.maxAge) {
+         throw new Error("--max-age is required for sigstore enrollments");
+       }
+-      const trustedRoot = options.communityTrustedRoot
+-        ? parseTrustedRootJson(
+-            await fetchSigstoreCommunityTrustedRoot(),
+-            "Sigstore TUF community trusted root",
+-          )
+-        : parseTrustedRootJson(
+-            await readFile(options.trustedRoot, "utf8"),
+-            options.trustedRoot,
+-          );
++      let trustedRoot: Record<string, unknown>;
++      if (options.communityTrustedRoot) {
++        trustedRoot = parseTrustedRootJson(
++          await fetchSigstoreCommunityTrustedRoot(),
++          "Sigstore TUF community trusted root",
++        );
++      } else {
++        const trustedRootPath = options.trustedRoot;
++        if (!trustedRootPath) {
++          throw new Error("--trusted-root is required for sigstore enrollments");
++        }
++        trustedRoot = parseTrustedRootJson(
++          await readFile(trustedRootPath, "utf8"),
++          trustedRootPath,
++        );
++      }
+       enrollmentObject = buildEnrollmentObject({
+         type: "sigstore",
+         trustedRoot,
+         issuer: options.issuer,
+         identity: options.identity,
+         maxAge: options.maxAge,
+       });
+     }
+ 
+     const json = JSON.stringify(enrollmentObject, null, 2);
+     const { hash, filePath } = await writeCasObject(json);
+     process.stdout.write(`Saved enrollment to ${filePath} (sha256=${hash}).\n`);
+     await writeMaybe(options.output, json);
+   });
+ 
+ enrollment
+   .command("canonicalize")
+   .description("Canonicalize an enrollment JSON file")
+   .requiredOption("-e, --enrollment <path>", "Enrollment file to canonicalize")
+   .option("-o, --output <path>", "Write canonical JSON to a file")
+   .action(async (options: { input: string; output?: string }) => {
+     const enrollmentObject = await loadEnrollment(options.input);
+     const canonical = canonicalize(enrollmentObject);
+     await writeMaybe(options.output, canonical);
+   });
+@@ -586,51 +595,51 @@ manifest
+       const bundleType = options.bundleType ?? "message";
+       if (bundleType !== "message" && bundleType !== "dsse") {
+         throw new Error("bundle type must be 'message' or 'dsse'");
+       }
+       if (options.oidcToken && options.interactive) {
+         throw new Error("use either --oidc-token or --interactive, not both");
+       }
+       let identityProvider: CIContextProvider | { getToken: () => Promise<string> };
+       if (options.oidcToken) {
+         const token = options.oidcToken;
+         identityProvider = { getToken: async () => token };
+       } else if (options.interactive) {
+         const issuer = options.oidcIssuer ?? SIGSTORE_OIDC_ISSUER;
+         const clientId = options.oidcClientId ?? SIGSTORE_OIDC_CLIENT_ID;
+         const scope = options.oidcScope ?? SIGSTORE_OIDC_SCOPE;
+         const openBrowserWindow = options.openBrowser ?? true;
+         const token = await fetchInteractiveOidcToken(issuer, clientId, scope, openBrowserWindow);
+         identityProvider = { getToken: async () => token };
+       } else {
+         identityProvider = new CIContextProvider(options.oidcAudience ?? "sigstore");
+       }
+       const signer = new FulcioSigner({
+         fulcioBaseURL: options.fulcioUrl ?? DEFAULT_FULCIO_URL,
+         identityProvider,
+       });
+-      const witnesses = [
++      const witnesses: Witness[] = [
+         new RekorWitness({ rekorBaseURL: options.rekorUrl ?? DEFAULT_REKOR_URL }),
+       ];
+       if (options.tsaUrl) {
+         witnesses.push(new TSAWitness({ tsaBaseURL: options.tsaUrl }));
+       }
+       const builder =
+         bundleType === "dsse"
+           ? new DSSEBundleBuilder({ signer, witnesses })
+           : new MessageSignatureBundleBuilder({ signer, witnesses });
+       const bundle = await builder.create({
+         data: Buffer.from(canonicalManifest),
+         type: "application/json",
+       });
+       const serializedBundle = bundleToJSON(bundle);
+       if (document.signatures && !Array.isArray(document.signatures)) {
+         throw new Error("manifest already contains sigsum signatures");
+       }
+       if (!document.signatures || !Array.isArray(document.signatures)) {
+         document.signatures = [];
+       }
+       document.signatures.push(serializedBundle);
+       const json = JSON.stringify(document, null, 2);
+       await writeMaybe(options.output, json);
+     }
+   );
+diff --git a/tests/cli.test.ts b/tests/cli.test.ts
+index 9ed9272c81208695e0333825062920423e6c51a6..6796253bfe0126e0e3500f5968ff90c122a28d7b 100644
+--- a/tests/cli.test.ts
++++ b/tests/cli.test.ts
+@@ -75,50 +75,53 @@ describe("integer and range validation", () => {
+   });
+ 
+   it("validates CAS URLs", () => {
+     expect(() => validateCasUrl("notaurl")).toThrow("invalid CAS URL");
+     expect(() => validateCasUrl("http://example.com")).toThrow("CAS URL must use https://");
+     expect(() => validateCasUrl("https://")).toThrow("invalid CAS URL");
+     expect(() => validateCasUrl("https://example.com")).not.toThrow();
+   });
+ });
+ 
+ describe("enrollment helpers", () => {
+   const baseSigner = "aa".repeat(32);
+   const secondSigner = "bb".repeat(32);
+ 
+   it("builds normalized enrollment objects", () => {
+     const enrollment = buildEnrollmentObject({
+       type: "sigsum",
+       policy: "policy-bytes",
+       signers: [baseSigner],
+       threshold: 1,
+       maxAge: 1_000_000,
+       casUrl: "https://example.com",
+     });
+ 
+     expect(enrollment.type).toBe("sigsum");
++    if (enrollment.type !== "sigsum") {
++      throw new Error("expected sigsum enrollment");
++    }
+     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
+     expect(enrollment.threshold).toBe(1);
+     expect(enrollment.max_age).toBe(1_000_000);
+   });
+ 
+   it("rejects duplicate or insufficient signer information", () => {
+     expect(() =>
+       buildEnrollmentObject({
+         type: "sigsum",
+         policy: "policy",
+         signers: [],
+         threshold: 1,
+         maxAge: 1_000_000,
+         casUrl: "https://example.com",
+       }),
+     ).toThrow("at least one signer must be provided");
+ 
+     expect(() =>
+       buildEnrollmentObject({
+         type: "sigsum",
+         policy: "policy",
+         signers: [baseSigner, baseSigner],
+         threshold: 1,
+         maxAge: 1_000_000,
+         casUrl: "https://example.com",
+@@ -172,50 +175,53 @@ describe("enrollment helpers", () => {
+     expect(enrollment).toEqual({
+       type: "sigstore",
+       trusted_root: trustedRoot,
+       identity: "identity@example.com",
+       issuer: "issuer.example",
+       max_age: 1_000_000,
+     });
+   });
+ 
+   it("parses enrollment JSON files", async () => {
+     const dir = await mkdtemp(path.join(tmpdir(), "webcat-enroll-"));
+     const file = path.join(dir, "enrollment.json");
+     await writeFile(
+       file,
+       JSON.stringify({
+         type: "sigsum",
+         policy: "policy",
+         signers: [hexToBase64Url(baseSigner)],
+         threshold: 1,
+         max_age: 1_000_000,
+         cas_url: "https://example.com",
+       }),
+     );
+ 
+     const loaded = await loadEnrollment(file);
++    if (loaded.type !== "sigsum") {
++      throw new Error("expected sigsum enrollment");
++    }
+     expect(loaded.signers).toEqual([hexToBase64Url(baseSigner)]);
+     expect(loaded.type).toBe("sigsum");
+ 
+     await writeFile(file, "not json");
+     await expect(loadEnrollment(file)).rejects.toThrow("failed to parse enrollment JSON");
+ 
+     await rm(dir, { recursive: true, force: true });
+   });
+ 
+   it("parses enrollment objects with validation", () => {
+     expect(() =>
+       parseEnrollmentObject({
+         type: "sigsum",
+         policy: "",
+         signers: ["x"],
+         threshold: 1,
+         max_age: 1,
+         cas_url: "https://example.com",
+       }),
+     ).toThrow("enrollment.policy must be a base64url string");
+ 
+     expect(() =>
+       parseEnrollmentObject({
+         type: "sigsum",
+         policy: "policy",
+

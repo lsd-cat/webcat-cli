@@ -26,17 +26,17 @@ function loadCasUploadConfig(): CasUploadConfig | null {
   if (!endpoint && !bucket && !token) {
     return null;
   }
-  const missing = [];
-  if (!endpoint) {
-    missing.push("WEBCAT_CAS_S3_ENDPOINT");
-  }
-  if (!bucket) {
-    missing.push("WEBCAT_CAS_S3_BUCKET");
-  }
-  if (!token) {
-    missing.push("WEBCAT_CAS_S3_TOKEN");
-  }
-  if (missing.length > 0) {
+  if (!endpoint || !bucket || !token) {
+    const missing = [];
+    if (!endpoint) {
+      missing.push("WEBCAT_CAS_S3_ENDPOINT");
+    }
+    if (!bucket) {
+      missing.push("WEBCAT_CAS_S3_BUCKET");
+    }
+    if (!token) {
+      missing.push("WEBCAT_CAS_S3_TOKEN");
+    }
     throw new Error(`missing CAS upload environment variables: ${missing.join(", ")}`);
   }
   return {

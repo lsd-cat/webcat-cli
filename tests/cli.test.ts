@@ -97,6 +97,9 @@ describe("enrollment helpers", () => {
     });
 
     expect(enrollment.type).toBe("sigsum");
+    if (enrollment.type !== "sigsum") {
+      throw new Error("expected sigsum enrollment");
+    }
     expect(enrollment.signers).toEqual([hexToBase64Url(baseSigner)]);
     expect(enrollment.threshold).toBe(1);
     expect(enrollment.max_age).toBe(1_000_000);
@@ -194,6 +197,9 @@ describe("enrollment helpers", () => {
     );
 
     const loaded = await loadEnrollment(file);
+    if (loaded.type !== "sigsum") {
+      throw new Error("expected sigsum enrollment");
+    }
     expect(loaded.signers).toEqual([hexToBase64Url(baseSigner)]);
     expect(loaded.type).toBe("sigsum");
 
