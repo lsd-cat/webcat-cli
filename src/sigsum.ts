@@ -9,6 +9,13 @@ import {
 import { hexToBase64, hexToUint8Array } from "@freedomofpress/sigsum/dist/encoding.js";
 import { hexToBase64Url } from "./utils.js";
 
+function formatSigsumBinaryError(binary: string, err: NodeJS.ErrnoException): string {
+  if (err.code === "ENOENT") {
+    return `${binary} is not installed; install it via Go: go install sigsum.org/sigsum-go/cmd/${binary}@latest`;
+  }
+  return `failed to launch ${binary}: ${err.message}`;
+}
+
 function runSigsumKeyToHex(pubKeyPath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn("sigsum-key", ["to-hex", "-k", pubKeyPath], { stdio: ["ignore", "pipe", "pipe"] });
@@ -19,8 +26,8 @@ function runSigsumKeyToHex(pubKeyPath: string): Promise<string> {
     child.stdout.on("data", (d) => output += d.toString());
     child.stderr.on("data", (d) => errout += d.toString());
 
-    child.on("error", (err) => {
-      reject(new Error(`failed to launch sigsum-key: ${err.message}`));
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      reject(new Error(formatSigsumBinaryError("sigsum-key", err)));
     });
 
     child.on("exit", (code, signal) => {
@@ -52,8 +59,8 @@ export async function runSigsumSubmit(policyPath: string, keyPath: string, paylo
     const child = spawn("sigsum-submit", ["-p", policyPath, "-k", keyPath, payloadPath], {
       stdio: "inherit",
     });
-    child.on("error", (err) => {
-      reject(new Error(`failed to launch sigsum-submit: ${err.message}`));
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      reject(new Error(formatSigsumBinaryError("sigsum-submit", err)));
     });
     child.on("exit", (code, signal) => {
       if (code === 0) {
