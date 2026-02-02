@@ -3,6 +3,10 @@
   "version": "0.1.1",
   "description": "WEBCAT CLI for creating, validating, and packaging enrollments and manifests.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/freedomofpress/webcat-cli"
+  },
   "type": "module",
   "bin": {
     "webcat": "dist/cli.cjs"
