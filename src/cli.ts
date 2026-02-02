@@ -6,11 +6,17 @@ import { createHash, randomBytes } from "node:crypto";
 import process from "node:process";
 import path from "node:path";
 import { tmpdir } from "node:os";
-import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler";
-import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
-import { Hash, KeyHash, Leaf, RawPublicKey, Signature } from "@freedomofpress/sigsum/dist/types";
-import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify";
-import { SigsumProof } from "@freedomofpress/sigsum/dist/proof";
+import { compilePolicy } from "@freedomofpress/sigsum/dist/policyCompiler.js";
+import { parsePolicyText } from "@freedomofpress/sigsum/dist/config.js";
+import {
+  Hash,
+  KeyHash,
+  Leaf,
+  RawPublicKey,
+  Signature,
+} from "@freedomofpress/sigsum/dist/types.js";
+import { verifyHashWithCompiledPolicy } from "@freedomofpress/sigsum/dist/verify.js";
+import { SigsumProof } from "@freedomofpress/sigsum/dist/proof.js";
 import { bundleToJSON } from "@sigstore/bundle";
 import {
   CIContextProvider,
@@ -24,9 +30,9 @@ import {
   type Witness,
 } from "@sigstore/sign";
 import { Updater } from "tuf-js";
-import { canonicalize } from "./canonicalize";
-import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment";
-import { writeCasObject } from "./cas";
+import { canonicalize } from "./canonicalize.js";
+import { EnrollmentInput, buildEnrollmentObject, loadEnrollment } from "./enrollment.js";
+import { writeCasObject } from "./cas.js";
 import {
   ManifestDocument,
   ManifestContent,
@@ -34,10 +40,10 @@ import {
   loadManifestConfig,
   loadManifestDocument,
   scanDirectory,
-} from "./manifest";
-import { loadBundleDocument } from "./bundle";
-import { deriveSignerKeyFromPrivateKey, fetchTimestampFromPolicy, runSigsumSubmit } from "./sigsum";
-import { decodeKeyMaterial, decodePolicyBytes, hashPolicyBytes, toBase64Url } from "./utils";
+} from "./manifest.js";
+import { loadBundleDocument } from "./bundle.js";
+import { deriveSignerKeyFromPrivateKey, fetchTimestampFromPolicy, runSigsumSubmit } from "./sigsum.js";
+import { decodeKeyMaterial, decodePolicyBytes, hashPolicyBytes, toBase64Url } from "./utils.js";
 
 const SIGSTORE_TUF_BASE_URL = "https://tuf-repo-cdn.sigstore.dev";
 const SIGSTORE_TUF_ROOT_URL = `${SIGSTORE_TUF_BASE_URL}/1.root.json`;

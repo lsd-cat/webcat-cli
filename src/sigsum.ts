@@ -1,13 +1,13 @@
 import { spawn } from "node:child_process";
-import { Base64KeyHash, Hash, Signature } from "@freedomofpress/sigsum/dist/types";
-import { parsePolicyText } from "@freedomofpress/sigsum/dist/config";
+import { Base64KeyHash, Hash, Signature } from "@freedomofpress/sigsum/dist/types.js";
+import { parsePolicyText } from "@freedomofpress/sigsum/dist/config.js";
 import {
   hashKey,
   verifyCosignedTreeHead,
   verifySignedTreeHead,
-} from "@freedomofpress/sigsum/dist/crypto";
-import { hexToBase64, hexToUint8Array } from "@freedomofpress/sigsum/dist/encoding";
-import { hexToBase64Url } from "./utils";
+} from "@freedomofpress/sigsum/dist/crypto.js";
+import { hexToBase64, hexToUint8Array } from "@freedomofpress/sigsum/dist/encoding.js";
+import { hexToBase64Url } from "./utils.js";
 
 function runSigsumKeyToHex(pubKeyPath: string): Promise<string> {
   return new Promise((resolve, reject) => {

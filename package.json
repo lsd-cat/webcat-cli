@@ -1,14 +1,32 @@
 {
-  "name": "webcat-cli",
+  "name": "@freedomofpress/webcat-cli",
   "version": "0.1.0",
+  "description": "WEBCAT CLI for creating, validating, and packaging enrollments and manifests.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "webcat": "dist/cli.cjs"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "tsx src/cli.ts",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc && npm run build:cli",
+    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=cjs --outfile=dist/cli.cjs",
+    "prepublishOnly": "npm run build",
     "test": "vitest run"
   },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.956.0",
+    "@aws-sdk/client-s3": "^3.980.0",
     "@freedomofpress/sigsum": "^0.3.8",
+    "@freedomofpress/webcat-cli": "file:freedomofpress-webcat-cli-0.1.0.tgz",
     "@sigstore/bundle": "^4.0.0",
     "@sigstore/sign": "^4.1.0",
     "commander": "^14.0.2",
@@ -18,6 +36,7 @@
     "@types/node": "^24.10.1",
     "@types/yargs": "^17.0.34",
     "@vitest/coverage-v8": "^4.0.15",
+    "esbuild": "^0.25.2",
     "tsx": "^4.16.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.15"

@@ -103,7 +103,7 @@ Refer to the GitHub Actions described above.
 ## Installation
 
 ```sh
-npm install
+npm install @freedomofpress/webcat-cli
 ```
 
 Run the CLI directly with `tsx` during development:
@@ -112,7 +112,13 @@ Run the CLI directly with `tsx` during development:
 npx tsx src/cli.ts --help
 ```
 
-To build the JavaScript output, run `npm run build`.
+To run the installed CLI:
+
+```sh
+npx webcat --help
+```
+
+To build the JavaScript output for publishing, run `npm run build`.
 
 ## Enrollment helpers
 

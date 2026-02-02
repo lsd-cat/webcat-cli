@@ -2,13 +2,13 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { SerializedBundle } from "@sigstore/bundle";
-import { canonicalize } from "./canonicalize";
+import { canonicalize } from "./canonicalize.js";
 import {
   ensureAbsolutePath,
   ensureNonEmptyString,
   ensureRecordOfStrings,
   toBase64Url,
-} from "./utils";
+} from "./utils.js";
 
 const WASM_EXTENSION = ".wasm";
 

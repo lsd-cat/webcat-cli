@@ -3,15 +3,15 @@ export {
   loadEnrollment,
   parseEnrollmentObject,
   parseSignerKey,
-} from "./enrollment";
+} from "./enrollment.js";
 export {
   canonicalizeManifestBody,
   loadManifestConfig,
   loadManifestDocument,
   parseManifestDocumentObject,
   scanDirectory,
-} from "./manifest";
-export { loadBundleDocument } from "./bundle";
+} from "./manifest.js";
+export { loadBundleDocument } from "./bundle.js";
 export {
   decodeKeyMaterial,
   decodePolicyBytes,
@@ -23,4 +23,4 @@ export {
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
-} from "./utils";
+} from "./utils.js";

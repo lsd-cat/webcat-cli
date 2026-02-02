@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
-import { EnrollmentInput, parseEnrollmentObject } from "./enrollment";
-import { ManifestDocument, parseManifestDocumentObject } from "./manifest";
+import { EnrollmentInput, parseEnrollmentObject } from "./enrollment.js";
+import { ManifestDocument, parseManifestDocumentObject } from "./manifest.js";
 
 export async function loadBundleDocument(bundlePath: string): Promise<{
   enrollment: EnrollmentInput;

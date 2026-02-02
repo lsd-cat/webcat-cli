@@ -8,7 +8,7 @@ import {
   toBase64Url,
   validateCasUrl,
   validateMaxAge,
-} from "./utils";
+} from "./utils.js";
 
 export type EnrollmentType = "sigsum" | "sigstore";
 
