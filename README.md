@@ -106,19 +106,18 @@ Refer to the GitHub Actions described above.
 npm install @freedomofpress/webcat-cli
 ```
 
-Run the CLI directly with `tsx` during development:
-
-```sh
-npx tsx src/cli.ts --help
-```
-
 To run the installed CLI:
 
 ```sh
 npx webcat --help
 ```
 
-To build the JavaScript output for publishing, run `npm run build`.
+Sigsum needs to be installed separately, as it currently is only available as a Go binary:
+
+```
+go install sigsum.org/sigsum-go/cmd/sigsum-key@latest
+go install sigsum.org/sigsum-go/cmd/sigsum-submit@latest
+```
 
 ## Enrollment helpers
 
