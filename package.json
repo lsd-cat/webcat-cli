@@ -29,14 +29,17 @@
     "@freedomofpress/sigsum": "^0.3.8",
     "@sigstore/bundle": "^4.0.0",
     "@sigstore/sign": "^4.1.0",
-    "commander": "^14.0.2",
-    "tuf-js": "^4.1.0",
     "@types/node": "^24.10.1",
     "@types/yargs": "^17.0.34",
     "@vitest/coverage-v8": "^4.0.15",
+    "commander": "^14.0.2",
     "esbuild": "^0.25.2",
     "tsx": "^4.16.0",
+    "tuf-js": "^4.1.0",
     "typescript": "^5.9.3",
     "vitest": "^4.0.15"
+  },
+  "dependencies": {
+    "@freedomofpress/webcat-cli": "^0.1.1"
   }
 }

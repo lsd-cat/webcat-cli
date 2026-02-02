@@ -417,6 +417,7 @@ enrollment
 
 
 const manifest = program.command("manifest").description("Manifest helpers");
+const collectValues = (value: string, previous: string[] = []) => previous.concat(value);
 
 manifest
   .command("generate")
@@ -426,6 +427,7 @@ manifest
   .requiredOption("-d, --directory <path>", "Directory containing site assets")
   .option("-p, --policy-file <path>", "Sigsum policy file for timestamps")
   .option("--include-dotfiles", "Include dotfiles and dotfolders in the manifest")
+  .option("--exclude <path>", "Exclude a file or directory from the manifest (repeatable)", collectValues)
   .option("-o, --output <path>", "Write manifest to a file instead of stdout")
   .action(
     async (options: {
@@ -434,6 +436,7 @@ manifest
       directory: string;
       policyFile?: string;
       includeDotfiles?: boolean;
+      exclude?: string[];
       output?: string;
     }) => {
       const type = options.type ?? "sigsum";
@@ -445,7 +448,10 @@ manifest
       }
       const [config, scan, policyText] = await Promise.all([
         loadManifestConfig(options.config),
-        scanDirectory(options.directory, { includeDotfiles: options.includeDotfiles }),
+        scanDirectory(options.directory, {
+          includeDotfiles: options.includeDotfiles,
+          excludePaths: options.exclude,
+        }),
         type === "sigsum" && options.policyFile ? readFile(options.policyFile, "utf8") : Promise.resolve(""),
       ]);
       const indexKey = "/" + config.default_index.replace(/^\/+/, "");

@@ -41,6 +41,7 @@ export interface DirectoryScanResult {
 
 export interface DirectoryScanOptions {
   includeDotfiles?: boolean;
+  excludePaths?: string[];
 }
 
 export async function loadManifestConfig(configPath: string): Promise<ManifestConfig> {
@@ -113,6 +114,20 @@ export async function scanDirectory(
     wasm: new Set(),
   };
   const includeDotfiles = options.includeDotfiles ?? false;
+  const excludePaths = (options.excludePaths ?? [])
+    .map((raw) => raw.trim())
+    .filter(Boolean)
+    .map((raw) => raw.replace(/\\/g, "/"))
+    .map((raw) => raw.replace(/^\.?\/*/, ""))
+    .map((raw) => raw.replace(/\/+$/, ""));
+
+  const shouldExclude = (relativePath: string): boolean => {
+    if (excludePaths.length === 0) {
+      return false;
+    }
+    const normalized = relativePath.replace(/\\/g, "/");
+    return excludePaths.some((exclude) => normalized === exclude || normalized.startsWith(`${exclude}/`));
+  };
 
   async function walk(currentDir: string, relativePrefix: string): Promise<void> {
     const entries = await readdir(currentDir, { withFileTypes: true });
@@ -120,16 +135,18 @@ export async function scanDirectory(
       if (!includeDotfiles && entry.name.startsWith(".")) {
         continue;
       }
+      const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
+      if (shouldExclude(relativePath)) {
+        continue;
+      }
       const entryPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        const nextPrefix = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
-        await walk(entryPath, nextPrefix);
+        await walk(entryPath, relativePath);
         continue;
       }
       if (!entry.isFile()) {
         continue;
       }
-      const relativePath = relativePrefix ? `${relativePrefix}/${entry.name}` : entry.name;
       const manifestPath = `/${relativePath}`;
       const contents = await readFile(entryPath);
       const digest = createHash("sha256").update(contents).digest();

@@ -367,6 +367,21 @@ describe("directory scanning", () => {
 
     await rm(dir, { recursive: true, force: true });
   });
+
+  it("skips excluded files and directories", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "webcat-exclude-"));
+    await writeFile(path.join(dir, "index.html"), "hello");
+    await writeFile(path.join(dir, "ignore.txt"), "secret");
+    await mkdir(path.join(dir, "private"));
+    await writeFile(path.join(dir, "private", "hidden.txt"), "hidden");
+
+    const result = await scanDirectory(dir, { excludePaths: ["/private", "ignore.txt"] });
+    expect(result.files.has("/index.html")).toBe(true);
+    expect(result.files.has("/ignore.txt")).toBe(false);
+    expect(result.files.has("/private/hidden.txt")).toBe(false);
+
+    await rm(dir, { recursive: true, force: true });
+  });
 });
 
 describe("manifest parsing", () => {
