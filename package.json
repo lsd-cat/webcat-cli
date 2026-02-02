@@ -18,8 +18,7 @@
     "test": "vitest run"
   },
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.980.0",
